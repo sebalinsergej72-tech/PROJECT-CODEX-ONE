@@ -1,0 +1,186 @@
+{
+  "name": "SmartBrain - RL Replay Update (30m)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "trigger_30m",
+      "name": "Every 30m",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 240]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/training/rl-replay",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "run_rl_replay",
+      "name": "Run RL Replay Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 240]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.status}}",
+              "rightValue": "updated",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_updated",
+      "name": "Updated?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [760, 240]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "info"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`RL replay update done: ${$json.model_version}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_updated",
+      "name": "Log Updated",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1020, 180],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "warn"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`RL replay update skipped: ${$json.reason || 'unknown'}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_skipped",
+      "name": "Log Skipped",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1020, 320],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 30m": {
+      "main": [
+        [
+          {
+            "node": "Run RL Replay Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run RL Replay Update": {
+      "main": [
+        [
+          {
+            "node": "Updated?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Updated?": {
+      "main": [
+        [
+          {
+            "node": "Log Updated",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

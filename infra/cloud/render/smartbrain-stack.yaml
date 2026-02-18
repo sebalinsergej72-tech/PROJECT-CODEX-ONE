@@ -1,0 +1,97 @@
+services:
+  - type: web
+    name: smartbrain-service
+    env: docker
+    dockerfilePath: ./services/smartbrain-python/Dockerfile
+    autoDeploy: true
+    healthCheckPath: /health
+    plan: starter
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_PORT
+        value: "8000"
+      - key: SMARTBRAIN_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: HYPERLIQUID_PRIVATE_KEY
+        sync: false
+      - key: HYPERLIQUID_ACCOUNT_ADDRESS
+        sync: false
+      - key: HYPERLIQUID_USE_TESTNET
+        value: "false"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GROK_API_KEY
+        sync: false
+      - key: CRYPTOPANIC_API_KEY
+        sync: false
+      - key: NEWS_API_KEY
+        sync: false
+      - key: LUNARCRUSH_API_KEY
+        sync: false
+      - key: COINGECKO_API_KEY
+        sync: false
+      - key: MODEL_STORE_DIR
+        value: /var/data/model_store
+    disk:
+      name: smartbrain-model-store
+      mountPath: /var/data
+      sizeGB: 10
+
+  - type: web
+    name: smartbrain-n8n
+    env: docker
+    dockerfilePath: ./services/n8n/Dockerfile
+    autoDeploy: true
+    plan: starter
+    envVars:
+      - key: N8N_HOST
+        sync: false
+      - key: N8N_PROTOCOL
+        value: https
+      - key: N8N_PORT
+        value: "5678"
+      - key: N8N_EDITOR_BASE_URL
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: N8N_SECURE_COOKIE
+        value: "true"
+      - key: N8N_ENCRYPTION_KEY
+        sync: false
+      - key: N8N_RUNNERS_ENABLED
+        value: "true"
+      - key: EXECUTIONS_MODE
+        value: regular
+      - key: EXECUTIONS_DATA_SAVE_ON_ERROR
+        value: all
+      - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
+        value: all
+      - key: EXECUTIONS_DATA_PRUNE
+        value: "true"
+      - key: EXECUTIONS_DATA_MAX_AGE
+        value: "336"
+      - key: DB_TYPE
+        value: postgresdb
+      - key: DB_POSTGRESDB_HOST
+        sync: false
+      - key: DB_POSTGRESDB_PORT
+        value: "5432"
+      - key: DB_POSTGRESDB_DATABASE
+        sync: false
+      - key: DB_POSTGRESDB_USER
+        sync: false
+      - key: DB_POSTGRESDB_PASSWORD
+        sync: false
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        sync: false
+      - key: N8N_BASIC_AUTH_PASSWORD
+        sync: false
+      - key: GENERIC_TIMEZONE
+        value: UTC

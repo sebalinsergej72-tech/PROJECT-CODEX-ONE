@@ -1,0 +1,3 @@
+# Optional: install only if you want psycopg migration path.
+# Fallback modes (supabase CLI / psql + stdlib HTTP) work without these deps.
+psycopg[binary]==3.2.9

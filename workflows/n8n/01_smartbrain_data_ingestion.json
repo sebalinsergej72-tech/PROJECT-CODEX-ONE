@@ -1,0 +1,231 @@
+{
+  "name": "SmartBrain - Data Ingestion (5m)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule_trigger",
+      "name": "Every 5m",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/ingest/snapshot",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http_ingest",
+      "name": "Call SmartBrain Ingest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/features/materialize",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"timeframes\": [\"1m\", \"5m\", \"15m\", \"1h\", \"4h\", \"1d\"],\n  \"symbols\": [\"BTC\", \"ETH\"]\n}",
+        "options": {}
+      },
+      "id": "http_features",
+      "name": "Materialize Features",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.success}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_success",
+      "name": "Ingestion OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1030,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "info"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`Ingestion cycle complete at ${$now}`}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase_log_ok",
+      "name": "Supabase Log Success",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1260,
+        180
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "error"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`Ingestion cycle failed at ${$now}`}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase_log_fail",
+      "name": "Supabase Log Failure",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1260,
+        340
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5m": {
+      "main": [
+        [
+          {
+            "node": "Call SmartBrain Ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call SmartBrain Ingest": {
+      "main": [
+        [
+          {
+            "node": "Materialize Features",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Materialize Features": {
+      "main": [
+        [
+          {
+            "node": "Ingestion OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingestion OK?": {
+      "main": [
+        [
+          {
+            "node": "Supabase Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

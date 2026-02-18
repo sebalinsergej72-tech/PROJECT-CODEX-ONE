@@ -1,0 +1,333 @@
+{
+  "name": "SmartBrain - Decision Cycle Multi-Asset + Risk",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "schedule_trigger",
+      "name": "Every 1m",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 280]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/settings/active",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get_settings",
+      "name": "Get Active Settings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 280]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.enabled}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "leftValue": "={{$json.emergency_stop}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_enabled",
+      "name": "AI Enabled & No Stop?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [740, 280]
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = items[0].json;\nconst mode = s.paper_mode ? 'paper' : 'live';\nconst symbols = Array.isArray(s.assets_whitelist) ? s.assets_whitelist : [];\nreturn symbols.filter(Boolean).map((symbol) => ({\n  json: {\n    symbol,\n    mode,\n    requested_leverage: Number(s.max_leverage || 1)\n  }\n}));"
+      },
+      "id": "expand_symbols",
+      "name": "Expand Whitelist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/autonomous/cycle",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"symbol\": \"{{$json.symbol}}\",\n  \"mode\": \"{{$json.mode}}\"\n}",
+        "options": {}
+      },
+      "id": "autonomous_cycle",
+      "name": "Run Autonomous Cycle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1240, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.success}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_cycle_success",
+      "name": "Cycle Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1480, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "info"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`Cycle success for ${$json.execution && $json.execution.details && $json.execution.details.symbol ? $json.execution.details.symbol : 'unknown'}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_success",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1720, 140],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "warn"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`Cycle blocked/failed for ${$json.risk && $json.risk.reasons ? JSON.stringify($json.risk.reasons) : 'unknown reason'}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_failure",
+      "name": "Log Failure",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1720, 280],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "warn"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`SmartBrain cycle skipped (disabled or emergency stop) at ${$now}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_skipped",
+      "name": "Log Skipped",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1000, 380],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 1m": {
+      "main": [
+        [
+          {
+            "node": "Get Active Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Settings": {
+      "main": [
+        [
+          {
+            "node": "AI Enabled & No Stop?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Enabled & No Stop?": {
+      "main": [
+        [
+          {
+            "node": "Expand Whitelist",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Whitelist": {
+      "main": [
+        [
+          {
+            "node": "Run Autonomous Cycle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Autonomous Cycle": {
+      "main": [
+        [
+          {
+            "node": "Cycle Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cycle Success?": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

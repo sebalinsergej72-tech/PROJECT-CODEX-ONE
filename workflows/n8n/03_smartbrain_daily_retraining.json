@@ -1,0 +1,215 @@
+{
+  "name": "SmartBrain - Daily Retraining & Promotion",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "cronExpression": "0 0 * * *"
+        }
+      },
+      "id": "daily_trigger",
+      "name": "Daily 00:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/performance/refresh",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "refresh_perf",
+      "name": "Refresh Live Performance",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/training/daily",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "run_retrain",
+      "name": "Run Daily Retrain",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 260]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.promoted}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if_promoted",
+      "name": "Promoted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1020, 260]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "warn"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`New model promoted: ${$json.new_version}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_promoted",
+      "name": "Log Promotion",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1260, 180],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "smartbrain_logs",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "level",
+              "fieldValue": "info"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{`Retrain completed, no promotion: ${$json.new_version}`}}"
+            },
+            {
+              "fieldId": "context",
+              "fieldValue": "={{$json}}"
+            }
+          ]
+        }
+      },
+      "id": "log_no_promotion",
+      "name": "Log Retrain",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1260, 340],
+      "credentials": {
+        "supabaseApi": {
+          "id": "smartbrain-supabase",
+          "name": "SmartBrain Supabase"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 00:00 UTC": {
+      "main": [
+        [
+          {
+            "node": "Refresh Live Performance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh Live Performance": {
+      "main": [
+        [
+          {
+            "node": "Run Daily Retrain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Daily Retrain": {
+      "main": [
+        [
+          {
+            "node": "Promoted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Promoted?": {
+      "main": [
+        [
+          {
+            "node": "Log Promotion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Retrain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "UTC"
+  },
+  "pinData": {}
+}
