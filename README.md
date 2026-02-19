@@ -3,34 +3,28 @@
 This repository contains implementation slices for SmartBrain:
 
 - `apps/web`: UI integration skeleton with a new `SmartBrain` control tab.
-- `workflows/n8n`: n8n workflow JSON definitions.
 - `services/smartbrain-python`: FastAPI microservice for ingestion, features, inference, risk checks, execution, performance tracking, and retraining.
-- `services/n8n`: n8n container image for cloud orchestration.
+- `workflows/n8n`: legacy n8n workflow JSON definitions (optional, not required).
 - `infra/supabase/migrations`: SQL migration for SmartBrain tables and settings.
-- `infra/cloud/render/smartbrain-stack.yaml`: Render blueprint for full cloud stack.
+- `infra/cloud/render/smartbrain-stack.yaml`: Render blueprint for low-cost single-service cloud mode.
 
-## Included workflows
+## Budget autonomous mode (primary)
 
-1. `01_smartbrain_data_ingestion.json`
-- Scheduled ingestion every 5 minutes.
-- Calls `/ingest/snapshot` and `/features/materialize`.
+SmartBrain now runs autonomous orchestration in-process via internal scheduler (`APScheduler`) inside the API service.
+No n8n and no Temporal are required.
 
-2. `02_smartbrain_decision_cycle.json`
-- Scheduled decision cycle every minute.
-- Pulls active settings from `/settings/active`.
-- Expands `assets_whitelist` and runs `/autonomous/cycle` per asset.
+Scheduler jobs:
 
-3. `03_smartbrain_daily_retraining.json`
-- Daily retraining at 00:00 UTC.
-- Calls `/performance/refresh` then `/training/daily`.
+1. Data ingestion every 5 minutes: `/ingest/snapshot`, `/features/materialize`.
+2. Decision cycle every 1 minute: `/settings/active` + `/autonomous/cycle` per asset.
+3. Online tree update every 1 hour: `/training/online-tree`.
+4. RL replay update every 30 minutes: `/training/rl-replay`.
+5. Daily retraining at 00:00 UTC: `/performance/refresh`, `/training/daily`.
 
-4. `04_smartbrain_hourly_tree_update.json`
-- Hourly incremental tree update.
-- Calls `/training/online-tree`.
+The decision cycle includes a global drawdown circuit breaker before execution in live mode.
 
-5. `05_smartbrain_rl_replay_30m.json`
-- RL replay refresh every 30 minutes.
-- Calls `/training/rl-replay`.
+Scheduler code:
+- `services/smartbrain-python/app/orchestration/internal_scheduler.py`
 
 ## Online learning behavior
 
@@ -43,8 +37,7 @@ This repository contains implementation slices for SmartBrain:
 Use `scripts/ops/bootstrap_smartbrain.py` to:
 
 - apply Supabase migration,
-- initialize SmartBrain settings,
-- import/activate n8n workflows,
+- initialize SmartBrain settings (enabled, paper/live, risk caps, whitelist),
 - verify SmartBrain health.
 
 Templates:

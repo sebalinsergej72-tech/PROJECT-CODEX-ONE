@@ -37,61 +37,21 @@ services:
         sync: false
       - key: MODEL_STORE_DIR
         value: /var/data/model_store
+      - key: INTERNAL_SCHEDULER_ENABLED
+        value: "true"
+      - key: SCHEDULER_INGESTION_INTERVAL_MINUTES
+        value: "5"
+      - key: SCHEDULER_DECISION_INTERVAL_MINUTES
+        value: "1"
+      - key: SCHEDULER_RL_REPLAY_INTERVAL_MINUTES
+        value: "30"
+      - key: SCHEDULER_TREE_INTERVAL_HOURS
+        value: "1"
+      - key: SCHEDULER_DAILY_RETRAIN_HOUR_UTC
+        value: "0"
+      - key: SCHEDULER_DAILY_RETRAIN_MINUTE_UTC
+        value: "0"
     disk:
       name: smartbrain-model-store
       mountPath: /var/data
       sizeGB: 10
-
-  - type: web
-    name: smartbrain-n8n
-    env: docker
-    dockerfilePath: ./services/n8n/Dockerfile
-    autoDeploy: true
-    plan: starter
-    envVars:
-      - key: N8N_HOST
-        sync: false
-      - key: N8N_PROTOCOL
-        value: https
-      - key: N8N_PORT
-        value: "5678"
-      - key: N8N_EDITOR_BASE_URL
-        sync: false
-      - key: WEBHOOK_URL
-        sync: false
-      - key: N8N_SECURE_COOKIE
-        value: "true"
-      - key: N8N_ENCRYPTION_KEY
-        sync: false
-      - key: N8N_RUNNERS_ENABLED
-        value: "true"
-      - key: EXECUTIONS_MODE
-        value: regular
-      - key: EXECUTIONS_DATA_SAVE_ON_ERROR
-        value: all
-      - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
-        value: all
-      - key: EXECUTIONS_DATA_PRUNE
-        value: "true"
-      - key: EXECUTIONS_DATA_MAX_AGE
-        value: "336"
-      - key: DB_TYPE
-        value: postgresdb
-      - key: DB_POSTGRESDB_HOST
-        sync: false
-      - key: DB_POSTGRESDB_PORT
-        value: "5432"
-      - key: DB_POSTGRESDB_DATABASE
-        sync: false
-      - key: DB_POSTGRESDB_USER
-        sync: false
-      - key: DB_POSTGRESDB_PASSWORD
-        sync: false
-      - key: N8N_BASIC_AUTH_ACTIVE
-        value: "true"
-      - key: N8N_BASIC_AUTH_USER
-        sync: false
-      - key: N8N_BASIC_AUTH_PASSWORD
-        sync: false
-      - key: GENERIC_TIMEZONE
-        value: UTC

@@ -23,13 +23,13 @@
     },
     {
       "parameters": {
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/ingest/snapshot",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/ingest/snapshot",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },
@@ -46,13 +46,13 @@
     },
     {
       "parameters": {
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/features/materialize",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/features/materialize",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },

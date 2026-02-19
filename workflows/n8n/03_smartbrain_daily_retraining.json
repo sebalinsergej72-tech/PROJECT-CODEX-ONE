@@ -4,11 +4,16 @@
     {
       "parameters": {
         "rule": {
-          "cronExpression": "0 0 * * *"
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
         }
       },
       "id": "daily_trigger",
-      "name": "Daily 00:00 UTC",
+      "name": "Every 24h",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [240, 260]
@@ -16,13 +21,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/performance/refresh",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/performance/refresh",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },
@@ -37,13 +42,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/training/daily",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/training/daily",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },
@@ -97,7 +102,7 @@
             },
             {
               "fieldId": "message",
-              "fieldValue": "={{`New model promoted: ${$json.new_version}`}}"
+              "fieldValue": "={{'New model promoted: ' + $json.new_version}}"
             },
             {
               "fieldId": "context",
@@ -131,7 +136,7 @@
             },
             {
               "fieldId": "message",
-              "fieldValue": "={{`Retrain completed, no promotion: ${$json.new_version}`}}"
+              "fieldValue": "={{'Retrain completed, no promotion: ' + $json.new_version}}"
             },
             {
               "fieldId": "context",
@@ -208,8 +213,7 @@
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1",
-    "timezone": "UTC"
+    "executionOrder": "v1"
   },
   "pinData": {}
 }

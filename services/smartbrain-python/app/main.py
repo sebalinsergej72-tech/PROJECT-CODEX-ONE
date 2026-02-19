@@ -22,6 +22,7 @@ from app.models.schemas import (
     RiskCheckRequest,
     RiskCheckResponse,
 )
+from app.orchestration.internal_scheduler import internal_scheduler
 from app.services.decision_engine import decision_engine
 from app.services.execution_service import execution_service
 from app.services.feature_engineering import feature_engineering_service
@@ -34,6 +35,18 @@ from app.services.state_service import state_service
 from app.services.training_service import training_service
 
 app = FastAPI(title="SmartBrain Service", version="0.4.0")
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    if settings.internal_scheduler_enabled:
+        await internal_scheduler.start()
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    if settings.internal_scheduler_enabled:
+        await internal_scheduler.stop()
 
 
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:

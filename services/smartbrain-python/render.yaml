@@ -18,3 +18,17 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: INTERNAL_SCHEDULER_ENABLED
+        value: "true"
+      - key: SCHEDULER_INGESTION_INTERVAL_MINUTES
+        value: "5"
+      - key: SCHEDULER_DECISION_INTERVAL_MINUTES
+        value: "1"
+      - key: SCHEDULER_RL_REPLAY_INTERVAL_MINUTES
+        value: "30"
+      - key: SCHEDULER_TREE_INTERVAL_HOURS
+        value: "1"
+      - key: SCHEDULER_DAILY_RETRAIN_HOUR_UTC
+        value: "0"
+      - key: SCHEDULER_DAILY_RETRAIN_MINUTE_UTC
+        value: "0"

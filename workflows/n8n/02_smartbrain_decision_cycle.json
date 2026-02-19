@@ -21,13 +21,13 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/settings/active",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/settings/active",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },
@@ -90,13 +90,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/autonomous/cycle",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/autonomous/cycle",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },

@@ -21,13 +21,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{$env.SMARTBRAIN_SERVICE_URL}}/training/rl-replay",
+        "url": "REPLACE_SMARTBRAIN_SERVICE_URL/training/rl-replay",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-API-Key",
-              "value": "={{$env.SMARTBRAIN_SERVICE_API_KEY}}"
+              "value": "REPLACE_SMARTBRAIN_API_KEY"
             }
           ]
         },

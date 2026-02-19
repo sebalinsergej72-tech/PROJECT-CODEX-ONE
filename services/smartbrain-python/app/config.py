@@ -36,5 +36,13 @@ class Settings(BaseSettings):
     rl_replay_window: int = 5000
     rl_replay_steps: int = 2000
 
+    internal_scheduler_enabled: bool = False
+    scheduler_ingestion_interval_minutes: int = 5
+    scheduler_decision_interval_minutes: int = 1
+    scheduler_rl_replay_interval_minutes: int = 30
+    scheduler_tree_interval_hours: int = 1
+    scheduler_daily_retrain_hour_utc: int = 0
+    scheduler_daily_retrain_minute_utc: int = 0
+
 
 settings = Settings()

@@ -12,7 +12,7 @@
 - sets paper/live mode and risk caps
 - applies whitelist
 
-3. Upserts all n8n workflows and optionally activates them:
+3. Optional: upserts all n8n workflows and optionally activates them:
 - `workflows/n8n/01_smartbrain_data_ingestion.json`
 - `workflows/n8n/02_smartbrain_decision_cycle.json`
 - `workflows/n8n/03_smartbrain_daily_retraining.json`
@@ -20,6 +20,8 @@
 - `workflows/n8n/05_smartbrain_rl_replay_30m.json`
 
 4. Optionally verifies SmartBrain service `/health`.
+
+For budget mode, you can skip n8n env vars entirely. The internal scheduler in `smartbrain-service` handles autonomous loops.
 
 ## Migration fallback order
 
@@ -32,11 +34,11 @@ The script executes SQL in this order:
 ## Required env vars
 
 - `SMARTBRAIN_SUPABASE_DB_URL`
-- `SMARTBRAIN_N8N_BASE_URL`
-- `SMARTBRAIN_N8N_API_KEY`
 
 ## Optional env vars
 
+- `SMARTBRAIN_N8N_BASE_URL` (set together with `SMARTBRAIN_N8N_API_KEY` only if you still use n8n mode)
+- `SMARTBRAIN_N8N_API_KEY`
 - `SMARTBRAIN_N8N_ACTIVATE` (`true|false`, default `true`)
 - `SMARTBRAIN_SERVICE_URL` (for health check)
 - `SMARTBRAIN_INIT_SETTINGS` (`true|false`, default `true`)

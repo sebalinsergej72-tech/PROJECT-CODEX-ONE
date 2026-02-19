@@ -5,9 +5,9 @@ This project can run fully autonomous in cloud without your local machine.
 ## Stack
 
 - SmartBrain API service (`services/smartbrain-python`)
-- n8n orchestrator (`services/n8n`)
 - Supabase (market/feature/trade/settings storage)
 - External model storage on persistent disk (`/var/data/model_store`)
+- Internal scheduler (`APScheduler`) inside SmartBrain API process
 
 ## Render Blueprint
 
@@ -17,12 +17,11 @@ Use:
 
 It deploys:
 
-1. `smartbrain-service` (FastAPI)
-2. `smartbrain-n8n` (n8n)
+1. `smartbrain-service` (FastAPI + internal autonomous scheduler)
 
 ## After deploy
 
-1. Set env vars for both services (API keys, DB credentials, SmartBrain secret).
+1. Set env vars for service (API keys, Supabase, Hyperliquid, scheduler flags).
 2. Run bootstrap:
 
 ```bash
@@ -31,7 +30,7 @@ make smartbrain-bootstrap
 
 3. Confirm:
 - SmartBrain health: `https://<smartbrain-host>/health`
-- n8n opens and workflows are active
+- `smartbrain_logs` receives `internal_scheduler` records every minute/five minutes
 - `smartbrain_settings.enabled=true` in Supabase
 
 ## Safety default

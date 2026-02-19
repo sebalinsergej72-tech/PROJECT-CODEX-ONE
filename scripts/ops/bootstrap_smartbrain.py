@@ -294,13 +294,20 @@ def verify_smartbrain_service() -> None:
 
 def main() -> None:
     db_url = require_env("SMARTBRAIN_SUPABASE_DB_URL")
-    n8n_base_url = require_env("SMARTBRAIN_N8N_BASE_URL")
-    n8n_api_key = require_env("SMARTBRAIN_N8N_API_KEY")
+    n8n_base_url = os.getenv("SMARTBRAIN_N8N_BASE_URL", "").strip()
+    n8n_api_key = os.getenv("SMARTBRAIN_N8N_API_KEY", "").strip()
     activate_flag = env_bool("SMARTBRAIN_N8N_ACTIVATE", True)
 
     apply_migration(db_url)
     init_settings(db_url)
-    sync_workflows(n8n_base_url, n8n_api_key, activate=activate_flag)
+
+    if n8n_base_url and n8n_api_key:
+        sync_workflows(n8n_base_url, n8n_api_key, activate=activate_flag)
+    elif n8n_base_url or n8n_api_key:
+        print("[WARN] n8n sync skipped: both SMARTBRAIN_N8N_BASE_URL and SMARTBRAIN_N8N_API_KEY are required")
+    else:
+        print("[SKIP] n8n sync skipped: n8n env vars not set (internal scheduler mode)")
+
     verify_smartbrain_service()
     print("[DONE] SmartBrain bootstrap completed")
 
