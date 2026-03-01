@@ -54,6 +54,7 @@ class PolymarketClient:
         self._session: aiohttp.ClientSession | None = None
         self._clob_client: Any = None
         self._dry_run = settings.dry_run
+        self._missing_orderbooks: set[str] = set()
 
     def set_dry_run(self, enabled: bool) -> None:
         self._dry_run = enabled
@@ -300,12 +301,34 @@ class PolymarketClient:
         if not request.token_id:
             return OrderResult(success=False, order_id=None, tx_hash=None, error="Missing token_id for live order")
 
+        if request.token_id in self._missing_orderbooks:
+            return OrderResult(
+                success=False,
+                order_id=None,
+                tx_hash=None,
+                error=f"orderbook_not_found:{request.token_id}",
+            )
+
         try:
             response = await asyncio.to_thread(self._place_order_sync, request)
             order_id = str(response.get("orderID") or response.get("id") or "")
             tx_hash = str(response.get("transactionHash") or response.get("txHash") or order_id)
             return OrderResult(success=True, order_id=order_id or None, tx_hash=tx_hash or None)
         except Exception as exc:
+            text = str(exc).lower()
+            if "orderbook" in text and "does not exist" in text:
+                self._missing_orderbooks.add(request.token_id)
+                logger.warning(
+                    "Token orderbook does not exist; caching as invalid token_id={} market_id={}",
+                    request.token_id,
+                    request.market_id,
+                )
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    tx_hash=None,
+                    error=f"orderbook_not_found:{request.token_id}",
+                )
             logger.exception("Order placement failed")
             return OrderResult(success=False, order_id=None, tx_hash=None, error=str(exc))
 

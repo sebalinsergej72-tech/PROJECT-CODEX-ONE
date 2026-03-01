@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -120,6 +120,17 @@ class TradeExecutor:
         )
 
         if not result.success:
+            error_text = str(result.error or "")
+            if error_text.startswith("orderbook_not_found:"):
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "orderbook_not_found"
+                logger.info(
+                    "Trade {} skipped: orderbook not found for token_id={}",
+                    intent.external_trade_id,
+                    intent.token_id,
+                )
+                return
+
             copied_trade.status = TradeStatus.FAILED.value
             copied_trade.reason = result.error
             await self.notifications.send_message(
