@@ -66,6 +66,7 @@ class BackgroundOrchestrator:
     RUNTIME_KEY_DISCOVERY_AUTOADD = "runtime_discovery_autoadd"
     RUNTIME_KEY_TRADING_ENABLED = "runtime_trading_enabled"
     RUNTIME_KEY_DRY_RUN = "runtime_dry_run"
+    RUNTIME_KEY_LIVE_STARTED_AT = "runtime_live_started_at"
 
     def __init__(self) -> None:
         self.polymarket_client = PolymarketClient()
@@ -76,6 +77,7 @@ class BackgroundOrchestrator:
 
         self._risk_mode: RiskMode = settings.risk_mode
         self._dry_run: bool = settings.dry_run
+        self._live_started_at: datetime | None = None
         self._price_filter_enabled: bool = not settings.disable_price_filter
         self._high_conviction_boost_enabled: bool = True
         self._discovery_autoadd_enabled: bool = settings.discovery_autoadd_default
@@ -394,6 +396,12 @@ class BackgroundOrchestrator:
             self._dry_run = runtime_dry_run
             self.polymarket_client.set_dry_run(runtime_dry_run)
 
+        live_started_raw = await self._get_runtime_text(session, self.RUNTIME_KEY_LIVE_STARTED_AT)
+        self._live_started_at = self._parse_iso_datetime(live_started_raw)
+        if not self._dry_run and self._live_started_at is None:
+            self._live_started_at = datetime.now(tz=timezone.utc)
+            await self._set_runtime_text(session, self.RUNTIME_KEY_LIVE_STARTED_AT, self._live_started_at.isoformat())
+
     async def set_mode(self, mode: RiskMode) -> dict:
         self._risk_mode = mode
         await self._in_session(
@@ -439,12 +447,23 @@ class BackgroundOrchestrator:
         return await self.get_status()
 
     async def set_dry_run(self, enabled: bool) -> dict:
+        previous = self._dry_run
         self._dry_run = enabled
         self.polymarket_client.set_dry_run(enabled)
         await self._in_session(
             "set_dry_run",
             lambda session: self._set_runtime_bool(session, self.RUNTIME_KEY_DRY_RUN, enabled),
         )
+        if previous and not enabled:
+            self._live_started_at = datetime.now(tz=timezone.utc)
+            await self._in_session(
+                "set_live_started_at",
+                lambda session: self._set_runtime_text(
+                    session,
+                    self.RUNTIME_KEY_LIVE_STARTED_AT,
+                    self._live_started_at.isoformat(),
+                ),
+            )
         engine = "PAPER (DRY RUN)" if enabled else "LIVE"
         await self.notifications.send_message(f"Engine mode switched to {engine} from dashboard/API.")
         return await self.get_status()
@@ -583,6 +602,7 @@ class BackgroundOrchestrator:
             "daily_pnl_usd": self._last_portfolio_state.daily_pnl_usd,
             "daily_drawdown_pct": self._last_portfolio_state.daily_drawdown_pct,
             "cumulative_pnl_usd": self._last_portfolio_state.cumulative_pnl_usd,
+            "live_started_at": self._iso(self._live_started_at),
             "last_wallet_refresh_at": self._iso(self.last_wallet_refresh_at),
             "last_trade_scan_at": self._iso(self.last_trade_scan_at),
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
@@ -765,3 +785,20 @@ class BackgroundOrchestrator:
     @staticmethod
     def _iso(dt: datetime | None) -> str | None:
         return dt.isoformat() if dt else None
+
+    @staticmethod
+    def _parse_iso_datetime(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt

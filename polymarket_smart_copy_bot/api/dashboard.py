@@ -182,7 +182,7 @@ async function loadAll() {{
     const positions = await positionsResp.json();
 
     renderStatus(status);
-    renderTrades(trades.trades || []);
+    renderTrades(trades.trades || [], status);
     renderPositions(positions.positions || []);
     setMsg(`Updated: ${{new Date().toLocaleTimeString()}}`);
   }} catch (err) {{
@@ -273,14 +273,24 @@ function renderStatus(s) {{
   }}
 }}
 
-function renderTrades(rows) {{
+function renderTrades(rows, status) {{
   const body = document.getElementById('tradesBody');
   body.innerHTML = '';
-  if (!rows.length) {{
-    body.innerHTML = '<tr><td colspan="6" class="muted">No trades yet</td></tr>';
+  const liveOnly = status && status.dry_run === false && Boolean(status.live_started_at);
+  const liveStartedAt = liveOnly ? Date.parse(status.live_started_at) : Number.NaN;
+  const filtered = rows.filter((row) => {{
+    if (!liveOnly) return true;
+    const ts = Date.parse(row.copied_at || '');
+    if (Number.isNaN(ts) || Number.isNaN(liveStartedAt)) return false;
+    return ts >= liveStartedAt;
+  }});
+
+  if (!filtered.length) {{
+    const msg = liveOnly ? 'No trades since LIVE mode was enabled' : 'No trades yet';
+    body.innerHTML = `<tr><td colspan="6" class="muted">${{msg}}</td></tr>`;
     return;
   }}
-  for (const row of rows) {{
+  for (const row of filtered) {{
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${{(row.copied_at || '-').replace('T', ' ').slice(0, 19)}}</td>
