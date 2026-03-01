@@ -1,0 +1,23 @@
+.git
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/node_modules
+**/.DS_Store
+
+# keep build context tight; include only smart copy bot sources
+*
+!polymarket_smart_copy_bot/
+!polymarket_smart_copy_bot/**
+!Dockerfile
+!railway.json
+
+# never include secrets/local state
+polymarket_smart_copy_bot/.env
+polymarket_smart_copy_bot/config/.env
+polymarket_smart_copy_bot/config/.env*
+!polymarket_smart_copy_bot/.env.example
+!polymarket_smart_copy_bot/config/.env.example
+polymarket_smart_copy_bot/local.db
