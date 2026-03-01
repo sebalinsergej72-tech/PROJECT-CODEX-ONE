@@ -33,6 +33,7 @@ RUN pip install --upgrade pip \
     && rm -rf /wheels
 
 COPY polymarket_smart_copy_bot/ /app/
+RUN chown -R botuser:botuser /app
 
 USER botuser
 

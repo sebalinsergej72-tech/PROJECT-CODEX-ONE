@@ -159,7 +159,10 @@ class BackgroundOrchestrator:
             trades_provider=self.get_recent_trades,
             positions_provider=lambda open_only, limit: self.get_positions(open_only=open_only, limit=limit),
         )
-        await self.notifications.start()
+        try:
+            await self.notifications.start()
+        except Exception:
+            logger.exception("Telegram initialization failed; continuing without Telegram")
 
         _ORCHESTRATOR_INSTANCE = self
         self._register_jobs()
