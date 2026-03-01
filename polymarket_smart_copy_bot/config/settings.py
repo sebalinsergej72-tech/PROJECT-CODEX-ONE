@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     high_conviction_multiplier: float = Field(default=1.5, alias="HIGH_CONVICTION_MULTIPLIER")
 
     wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")
-    discovery_autoadd_default: bool = Field(default=False, alias="DISCOVERY_AUTOADD")
+    discovery_autoadd_default: bool = Field(default=True, alias="DISCOVERY_AUTOADD")
     discovery_min_trades_aggressive: int = Field(default=120, alias="DISCOVERY_MIN_TRADES_AGGRESSIVE")
     discovery_min_winrate_aggressive: float = Field(default=0.65, alias="DISCOVERY_MIN_WINRATE_AGGRESSIVE")
     discovery_min_profit_factor_aggressive: float = Field(

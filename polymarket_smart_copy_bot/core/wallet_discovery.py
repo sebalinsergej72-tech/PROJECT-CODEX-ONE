@@ -68,6 +68,7 @@ class DiscoveryResult:
     approvals_granted: int
     approvals_skipped: int
     ran_at: datetime
+    rejected_reasons: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -188,7 +189,7 @@ class WalletDiscovery:
         candidates = await self._fetch_candidate_seeds()
         if not candidates:
             fallback_enabled = await self._ensure_seed_fallback(session, mode)
-            result = DiscoveryResult(0, 0, 0, fallback_enabled, 0, 0, 0, now)
+            result = DiscoveryResult(0, 0, 0, fallback_enabled, 0, 0, 0, now, rejected_reasons={})
             self.last_result = result
             logger.warning(
                 "Discovery returned no candidates from leaderboard. enabled_wallets={}",
@@ -196,7 +197,7 @@ class WalletDiscovery:
             )
             return result
 
-        scored = await self._score_candidates(candidates, thresholds)
+        scored, rejected_reasons = await self._score_candidates(candidates, thresholds)
         scored.sort(key=lambda row: row.score, reverse=True)
 
         top10 = scored[:10]
@@ -211,6 +212,7 @@ class WalletDiscovery:
                 approvals_granted=0,
                 approvals_skipped=0,
                 ran_at=now,
+                rejected_reasons=rejected_reasons,
             )
             self.last_result = result
             real_seeds = self._load_real_seed_wallets(log_filter=False)
@@ -282,6 +284,7 @@ class WalletDiscovery:
             approvals_granted=approvals_granted,
             approvals_skipped=approvals_skipped,
             ran_at=now,
+            rejected_reasons=rejected_reasons,
         )
         self.last_result = result
         logger.info(
@@ -407,11 +410,11 @@ class WalletDiscovery:
         self,
         seeds: dict[str, CandidateSeed],
         thresholds: DiscoveryThresholds,
-    ) -> list[ScoredWallet]:
+    ) -> tuple[list[ScoredWallet], dict[str, int]]:
         limiter = asyncio.Semaphore(8)
         now = utc_now()
 
-        async def run(seed: CandidateSeed) -> ScoredWallet | None:
+        async def run(seed: CandidateSeed) -> tuple[ScoredWallet | None, str | None]:
             async with limiter:
                 return await self._score_single_wallet(seed, now, thresholds)
 
@@ -419,20 +422,25 @@ class WalletDiscovery:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         scored: list[ScoredWallet] = []
+        rejected_reasons: dict[str, int] = {}
         for result in results:
             if isinstance(result, Exception):
                 logger.warning("Wallet scoring failed: {}", result)
+                self._inc_rejection_reason(rejected_reasons, "scoring_error")
                 continue
-            if result is not None:
-                scored.append(result)
-        return scored
+            wallet, reason = result
+            if wallet is not None:
+                scored.append(wallet)
+                continue
+            self._inc_rejection_reason(rejected_reasons, reason or "unknown")
+        return scored, rejected_reasons
 
     async def _score_single_wallet(
         self,
         seed: CandidateSeed,
         now: datetime,
         thresholds: DiscoveryThresholds,
-    ) -> ScoredWallet | None:
+    ) -> tuple[ScoredWallet | None, str | None]:
         raw_trades = await self.polymarket_client.get_user_trades(seed.address, limit=500)
         raw_activity = await self.polymarket_client.get_user_activity(seed.address, limit=500)
 
@@ -443,7 +451,7 @@ class WalletDiscovery:
             or seed.profit_factor_hint is None
             or seed.avg_size_hint is None
         ):
-            return None
+            return None, "no_trade_data_and_no_hints"
 
         parsed_trades.sort(key=lambda trade: trade.traded_at, reverse=True)
         cutoff_90d = now - timedelta(days=90)
@@ -454,11 +462,11 @@ class WalletDiscovery:
         trades_90d_count = max(len(trades_90d), seed.trades_90d_hint or 0)
         trades_30d_count = max(len(trades_30d), seed.trades_30d_hint or 0)
         if trades_90d_count == 0:
-            return None
+            return None, "no_trades_90d"
 
         last_trade_ts = trades_90d[0].traded_at if trades_90d else seed.last_trade_ts_hint
         if last_trade_ts is None:
-            return None
+            return None, "missing_last_trade_ts"
 
         pnl_90d = [trade.pnl_usd for trade in trades_90d if trade.pnl_usd is not None]
         wins = sum(1 for pnl in pnl_90d if pnl > 0)
@@ -502,19 +510,19 @@ class WalletDiscovery:
 
         # Hard filters from strategy.
         if trades_90d_count < thresholds.min_trades_90d:
-            return None
+            return None, "min_trades_90d"
         if win_rate < thresholds.min_win_rate:
-            return None
+            return None, "min_win_rate"
         if profit_factor < thresholds.min_profit_factor:
-            return None
+            return None, "min_profit_factor"
         if avg_size <= thresholds.min_avg_size:
-            return None
+            return None, "min_avg_size"
         if days_since_last > thresholds.max_days_since_last_trade:
-            return None
+            return None, "max_days_since_last_trade"
         if consecutive_losses > thresholds.max_consecutive_losses:
-            return None
+            return None, "max_consecutive_losses"
         if wallet_age_days < thresholds.min_wallet_age_days:
-            return None
+            return None, "min_wallet_age_days"
 
         score = (
             win_rate * 120
@@ -526,20 +534,23 @@ class WalletDiscovery:
             - consecutive_losses * 15
         )
 
-        return ScoredWallet(
-            address=seed.address,
-            name=seed.name,
-            score=score,
-            win_rate=win_rate,
-            trades_90d=trades_90d_count,
-            profit_factor=profit_factor,
-            avg_size=avg_size,
-            niche=",".join(sorted(seed.niches)) if seed.niches else "overall",
-            last_trade_ts=last_trade_ts,
-            trades_30d=trades_30d_count,
-            monthly_pnl_pct=monthly_pnl_pct,
-            consecutive_losses=consecutive_losses,
-            wallet_age_days=wallet_age_days,
+        return (
+            ScoredWallet(
+                address=seed.address,
+                name=seed.name,
+                score=score,
+                win_rate=win_rate,
+                trades_90d=trades_90d_count,
+                profit_factor=profit_factor,
+                avg_size=avg_size,
+                niche=",".join(sorted(seed.niches)) if seed.niches else "overall",
+                last_trade_ts=last_trade_ts,
+                trades_30d=trades_30d_count,
+                monthly_pnl_pct=monthly_pnl_pct,
+                consecutive_losses=consecutive_losses,
+                wallet_age_days=wallet_age_days,
+            ),
+            None,
         )
 
     async def _request_top_wallet_approval(self, wallet: ScoredWallet) -> bool:
@@ -778,3 +789,7 @@ class WalletDiscovery:
             max_consecutive_losses=settings.discovery_max_consecutive_losses_conservative,
             min_wallet_age_days=settings.discovery_min_wallet_age_days_conservative,
         )
+
+    @staticmethod
+    def _inc_rejection_reason(stats: dict[str, int], reason: str) -> None:
+        stats[reason] = stats.get(reason, 0) + 1

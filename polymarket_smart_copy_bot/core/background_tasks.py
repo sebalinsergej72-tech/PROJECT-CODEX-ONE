@@ -428,6 +428,7 @@ class BackgroundOrchestrator:
             "last_run_at": result.ran_at.isoformat() if result else self._iso(self.last_wallet_refresh_at),
             "scanned_candidates": result.scanned_candidates if result else 0,
             "passed_filters": result.passed_filters if result else 0,
+            "rejected_reasons": result.rejected_reasons if result else {},
             "stored_top": result.stored_top if result else len(top),
             "enabled_wallets": self._tracked_wallets_count,
             "approvals_requested": result.approvals_requested if result else 0,
@@ -537,6 +538,15 @@ class BackgroundOrchestrator:
             "last_trade_scan_at": self._iso(self.last_trade_scan_at),
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
             "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
+            "discovery_filter_stats": (
+                self.wallet_discovery.last_result.rejected_reasons if self.wallet_discovery.last_result else {}
+            ),
+            "discovery_scanned_candidates": (
+                self.wallet_discovery.last_result.scanned_candidates if self.wallet_discovery.last_result else 0
+            ),
+            "discovery_passed_filters": (
+                self.wallet_discovery.last_result.passed_filters if self.wallet_discovery.last_result else 0
+            ),
             "risk_params": risk_params,
             "jobs": jobs,
         }
