@@ -2,26 +2,34 @@ wallets:
   - address: "0x1111111111111111111111111111111111111111"
     label: "MacroWhale"
     base_weight: 1.0
+    enabled: true
   - address: "0x2222222222222222222222222222222222222222"
     label: "ElectionSniper"
     base_weight: 1.0
+    enabled: true
   - address: "0x3333333333333333333333333333333333333333"
     label: "GeoRiskTrader"
     base_weight: 0.9
+    enabled: true
   - address: "0x4444444444444444444444444444444444444444"
     label: "NewsFlowAlpha"
     base_weight: 0.95
+    enabled: true
   - address: "0x5555555555555555555555555555555555555555"
     label: "LateArb"
     base_weight: 0.85
+    enabled: true
   - address: "0x6666666666666666666666666666666666666666"
     label: "ConsensusEdge"
     base_weight: 1.0
+    enabled: true
   - address: "0x7777777777777777777777777777777777777777"
     label: "EventSpecialist"
     base_weight: 0.9
+    enabled: true
   - address: "0x8888888888888888888888888888888888888888"
     label: "FlowFollower"
     base_weight: 0.9
+    enabled: true
 
 blacklist: []

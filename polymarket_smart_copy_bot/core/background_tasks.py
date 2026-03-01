@@ -294,6 +294,13 @@ class BackgroundOrchestrator:
         self._tracked_wallets_count = await self.wallet_discovery.count_enabled_wallets(session)
         self.last_wallet_refresh_at = datetime.now(tz=timezone.utc)
 
+        report = result.report or self.wallet_discovery.format_result_report(result)
+        logger.info("\n{}", report)
+        try:
+            await self.notifications.send_message(report)
+        except Exception:
+            logger.exception("Failed to send discovery report to Telegram")
+
         if result.approvals_requested > 0:
             await self.notifications.send_message(
                 f"Discovery: requested approvals={result.approvals_requested}, approved={result.approvals_granted}, skipped={result.approvals_skipped}"
@@ -423,14 +430,30 @@ class BackgroundOrchestrator:
     async def get_discovery_status(self) -> dict[str, Any]:
         top = await self.get_top_wallets(limit=10)
         result = self.wallet_discovery.last_result
+        counters = result.counters if result else None
         return {
             "autoadd": self._discovery_autoadd_enabled,
             "last_run_at": result.ran_at.isoformat() if result else self._iso(self.last_wallet_refresh_at),
             "scanned_candidates": result.scanned_candidates if result else 0,
             "passed_filters": result.passed_filters if result else 0,
+            "counters": {
+                "total_candidates": counters.total_candidates if counters else 0,
+                "passed_trades": counters.passed_trades if counters else 0,
+                "passed_win_rate": counters.passed_win_rate if counters else 0,
+                "passed_profit_factor": counters.passed_profit_factor if counters else 0,
+                "passed_avg_size": counters.passed_avg_size if counters else 0,
+                "passed_recency": counters.passed_recency if counters else 0,
+                "passed_consecutive_losses": counters.passed_consecutive_losses if counters else 0,
+                "passed_wallet_age": counters.passed_wallet_age if counters else 0,
+                "passed_all_filters": counters.passed_all_filters if counters else 0,
+            },
             "rejected_reasons": result.rejected_reasons if result else {},
             "stored_top": result.stored_top if result else len(top),
             "enabled_wallets": self._tracked_wallets_count,
+            "used_seed_fallback": result.used_seed_fallback if result else False,
+            "seed_fallback_wallets": result.seed_fallback_wallets if result else 0,
+            "mode": result.mode if result else self._risk_mode,
+            "report": result.report if result else "",
             "approvals_requested": result.approvals_requested if result else 0,
             "approvals_granted": result.approvals_granted if result else 0,
             "approvals_skipped": result.approvals_skipped if result else 0,
@@ -546,6 +569,45 @@ class BackgroundOrchestrator:
             ),
             "discovery_passed_filters": (
                 self.wallet_discovery.last_result.passed_filters if self.wallet_discovery.last_result else 0
+            ),
+            "last_discovery_stats": (
+                {
+                    "mode": self.wallet_discovery.last_result.mode,
+                    "ran_at": self.wallet_discovery.last_result.ran_at.isoformat(),
+                    "total_candidates": self.wallet_discovery.last_result.counters.total_candidates,
+                    "passed_trades": self.wallet_discovery.last_result.counters.passed_trades,
+                    "passed_win_rate": self.wallet_discovery.last_result.counters.passed_win_rate,
+                    "passed_profit_factor": self.wallet_discovery.last_result.counters.passed_profit_factor,
+                    "passed_avg_size": self.wallet_discovery.last_result.counters.passed_avg_size,
+                    "passed_recency": self.wallet_discovery.last_result.counters.passed_recency,
+                    "passed_consecutive_losses": self.wallet_discovery.last_result.counters.passed_consecutive_losses,
+                    "passed_wallet_age": self.wallet_discovery.last_result.counters.passed_wallet_age,
+                    "passed_all_filters": self.wallet_discovery.last_result.counters.passed_all_filters,
+                    "stored_top": self.wallet_discovery.last_result.stored_top,
+                    "enabled_wallets": self.wallet_discovery.last_result.enabled_wallets,
+                    "used_seed_fallback": self.wallet_discovery.last_result.used_seed_fallback,
+                    "seed_fallback_wallets": self.wallet_discovery.last_result.seed_fallback_wallets,
+                    "report": self.wallet_discovery.last_result.report,
+                }
+                if self.wallet_discovery.last_result
+                else {
+                    "mode": self._risk_mode,
+                    "ran_at": None,
+                    "total_candidates": 0,
+                    "passed_trades": 0,
+                    "passed_win_rate": 0,
+                    "passed_profit_factor": 0,
+                    "passed_avg_size": 0,
+                    "passed_recency": 0,
+                    "passed_consecutive_losses": 0,
+                    "passed_wallet_age": 0,
+                    "passed_all_filters": 0,
+                    "stored_top": 0,
+                    "enabled_wallets": self._tracked_wallets_count,
+                    "used_seed_fallback": False,
+                    "seed_fallback_wallets": 0,
+                    "report": "",
+                }
             ),
             "risk_params": risk_params,
             "jobs": jobs,

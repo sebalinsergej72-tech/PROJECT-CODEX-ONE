@@ -14,6 +14,7 @@ class WalletConfig:
     address: str
     label: str | None = None
     base_weight: float = 1.0
+    enabled: bool = True
 
 
 def utc_now() -> datetime:
@@ -55,6 +56,7 @@ def load_wallets(path: Path) -> list[WalletConfig]:
                 address=address,
                 label=wallet.get("label"),
                 base_weight=float(wallet.get("base_weight", 1.0)),
+                enabled=bool(wallet.get("enabled", True)),
             )
         )
     return parsed

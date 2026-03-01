@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     def conservative_max_total_exposure_pct(self) -> float:
         return 0.35
 
+    @property
+    def RISK_MODE(self) -> RiskMode:
+        return self.risk_mode
+
     # Backward-compatible aliases used by older modules/env names.
     @property
     def discovery_max_consecutive_losses_aggressive(self) -> int:
