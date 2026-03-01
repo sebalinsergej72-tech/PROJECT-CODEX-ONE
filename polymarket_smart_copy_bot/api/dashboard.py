@@ -37,6 +37,12 @@ async def dashboard() -> HTMLResponse:
     h1 {{ margin:0 0 14px; font-size: 24px; }}
     .row {{ display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 12px; }}
     .card {{ background: linear-gradient(180deg, var(--panel), var(--panel-2)); border: 1px solid #2a3c71; border-radius: 14px; padding: 12px; }}
+    .runtime {{ border-radius: 14px; padding: 14px 16px; margin: 8px 0 14px; border: 1px solid #2a3c71; background: linear-gradient(180deg, #0f1a36, #111931); }}
+    .runtime-title {{ font-size: 22px; font-weight: 800; letter-spacing: .02em; }}
+    .runtime-sub {{ margin-top: 6px; color: var(--muted); font-size: 13px; }}
+    .runtime-good {{ border-color: #1f8354; box-shadow: 0 0 0 1px rgba(33, 201, 122, 0.25) inset; }}
+    .runtime-warn {{ border-color: #8d6f2c; box-shadow: 0 0 0 1px rgba(245, 184, 90, 0.25) inset; }}
+    .runtime-bad {{ border-color: #8f3238; box-shadow: 0 0 0 1px rgba(241, 96, 103, 0.25) inset; }}
     .label {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
     .value {{ font-size: 20px; margin-top: 6px; }}
     .good {{ color: var(--good); }} .bad {{ color: var(--bad); }} .warn {{ color: var(--warn); }}
@@ -59,8 +65,8 @@ async def dashboard() -> HTMLResponse:
     <h1>Polymarket Smart Copy Bot</h1>
 
     <div class=\"controls\">
-      <button class=\"start\" onclick=\"setTrading(true)\">Start Trading</button>
-      <button class=\"stop\" onclick=\"setTrading(false)\">Stop Trading</button>
+      <button id=\"btnStart\" class=\"start\" onclick=\"setTrading(true)\">Start Trading</button>
+      <button id=\"btnStop\" class=\"stop\" onclick=\"setTrading(false)\">Stop Trading</button>
       <button class=\"refresh\" onclick=\"loadAll()\">Refresh now</button>
       <input id=\"token\" type=\"password\" placeholder=\"Dashboard write token (optional)\" />
       <span id=\"msg\" class=\"muted\"></span>
@@ -76,6 +82,11 @@ async def dashboard() -> HTMLResponse:
       <button class=\"refresh\" onclick=\"setAutoAdd(false)\">AutoAdd OFF</button>
     </div>
 
+    <div id=\"runtimeBanner\" class=\"runtime runtime-bad\">
+      <div id=\"runtimeTitle\" class=\"runtime-title\">Бот запускается...</div>
+      <div id=\"runtimeSub\" class=\"runtime-sub\">Ожидание первого ответа /status</div>
+    </div>
+
     <div class=\"row\">
       <div class=\"card\"><div class=\"label\">Engine</div><div class=\"value\" id=\"engine\">-</div></div>
       <div class=\"card\"><div class=\"label\">Trading</div><div class=\"value\" id=\"trading\">-</div></div>
@@ -88,6 +99,11 @@ async def dashboard() -> HTMLResponse:
       <div class=\"card\"><div class=\"label\">Discovery AutoAdd</div><div class=\"value\" id=\"autoAdd\">-</div></div>
       <div class=\"card\"><div class=\"label\">Daily PnL</div><div class=\"value\" id=\"dailyPnl\">-</div></div>
       <div class=\"card\"><div class=\"label\">Cumulative PnL</div><div class=\"value\" id=\"cumPnl\">-</div></div>
+    </div>
+
+    <div class=\"card\" style=\"margin-bottom:12px;\">
+      <div class=\"label\">Discovery Diagnostics</div>
+      <div id=\"discoveryDiag\" class=\"runtime-sub\">Ожидание данных...</div>
     </div>
 
     <div class=\"split\">
@@ -173,6 +189,7 @@ async function loadAll() {{
 function renderStatus(s) {{
   const dry = Boolean(s.dry_run);
   const trading = Boolean(s.trading_enabled);
+  const scheduler = Boolean(s.scheduler_running);
 
   document.getElementById('engine').textContent = dry ? 'DRY RUN' : 'LIVE';
   const tr = document.getElementById('trading');
@@ -200,6 +217,48 @@ function renderStatus(s) {{
   const cum = document.getElementById('cumPnl');
   cum.textContent = money(s.cumulative_pnl_usd || 0);
   cum.className = `value ${{toneForPnl(s.cumulative_pnl_usd)}}`;
+
+  const startBtn = document.getElementById('btnStart');
+  const stopBtn = document.getElementById('btnStop');
+  if (startBtn && stopBtn) {{
+    startBtn.disabled = trading;
+    stopBtn.disabled = !trading;
+    startBtn.style.opacity = trading ? '0.55' : '1';
+    stopBtn.style.opacity = !trading ? '0.55' : '1';
+  }}
+
+  const banner = document.getElementById('runtimeBanner');
+  const title = document.getElementById('runtimeTitle');
+  const sub = document.getElementById('runtimeSub');
+  if (banner && title && sub) {{
+    banner.classList.remove('runtime-good', 'runtime-warn', 'runtime-bad');
+    if (!scheduler) {{
+      banner.classList.add('runtime-bad');
+      title.textContent = 'БОТ НЕ РАБОТАЕТ';
+      sub.textContent = 'Scheduler stopped. Проверь deployment/service status.';
+    }} else if (!trading) {{
+      banner.classList.add('runtime-warn');
+      title.textContent = 'БОТ ЗАПУЩЕН, ТОРГОВЛЯ НА ПАУЗЕ';
+      sub.textContent = dry ? 'Paper-mode, но исполнение сделок выключено.' : 'Live-mode, но исполнение сделок выключено.';
+    }} else {{
+      banner.classList.add('runtime-good');
+      title.textContent = dry ? 'БОТ РАБОТАЕТ (PAPER MODE)' : 'БОТ РАБОТАЕТ (LIVE MODE)';
+      sub.textContent = `Скан кошельков активен. Последний trade scan: ${{s.last_trade_scan_at || 'n/a'}}`;
+    }}
+  }}
+
+  const diag = document.getElementById('discoveryDiag');
+  if (diag) {{
+    const scanned = Number(s.discovery_scanned_candidates || 0);
+    const passed = Number(s.discovery_passed_filters || 0);
+    const stats = s.discovery_filter_stats || {{}};
+    const topReasons = Object.entries(stats)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 5)
+      .map(([k, v]) => `${{k}}=${{v}}`)
+      .join(' | ');
+    diag.textContent = `scanned=${{scanned}}, passed=${{passed}}` + (topReasons ? ` | rejected: ${{topReasons}}` : '');
+  }}
 }}
 
 function renderTrades(rows) {{
