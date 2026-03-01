@@ -232,6 +232,22 @@ class PolymarketClient:
     async def fetch_market_mid_price(self, market_id: str, token_id: str | None = None) -> float | None:
         """Fetch current market price in cents for mark-to-market and risk controls."""
 
+        if token_id:
+            token_candidates = [
+                (f"{settings.polymarket_host.rstrip('/')}/midpoint", {"token_id": token_id}),
+                (f"{settings.polymarket_host.rstrip('/')}/last-trade-price", {"token_id": token_id}),
+                (f"{settings.polymarket_host.rstrip('/')}/book", {"token_id": token_id}),
+            ]
+            for url, params in token_candidates:
+                try:
+                    raw = await self._request_json("GET", url, params=params)
+                except Exception:
+                    continue
+
+                price = self._extract_token_price(raw)
+                if price is not None:
+                    return ensure_price_in_cents(price)
+
         candidate_urls = [
             f"{settings.polymarket_gamma_host.rstrip('/')}/markets/{market_id}",
             f"{settings.polymarket_gamma_host.rstrip('/')}/events/{market_id}",
@@ -376,6 +392,51 @@ class PolymarketClient:
             first = outcomes[0]
             if isinstance(first, dict) and first.get("price") is not None:
                 return float(first["price"])
+
+        return None
+
+    @staticmethod
+    def _extract_token_price(payload: Any) -> float | None:
+        """Extract decimal token price (0..1) from CLOB token endpoints."""
+
+        if not isinstance(payload, dict):
+            return None
+
+        for key in ("mid", "price", "lastTradePrice", "last_price"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+
+        # /book can provide bids/asks; estimate midpoint from top levels.
+        bids = payload.get("bids")
+        asks = payload.get("asks")
+        bid_px: float | None = None
+        ask_px: float | None = None
+        if isinstance(bids, list) and bids:
+            first_bid = bids[0]
+            if isinstance(first_bid, dict):
+                try:
+                    bid_px = float(first_bid.get("price"))
+                except (TypeError, ValueError):
+                    bid_px = None
+        if isinstance(asks, list) and asks:
+            first_ask = asks[0]
+            if isinstance(first_ask, dict):
+                try:
+                    ask_px = float(first_ask.get("price"))
+                except (TypeError, ValueError):
+                    ask_px = None
+
+        if bid_px is not None and ask_px is not None:
+            return (bid_px + ask_px) / 2
+        if bid_px is not None:
+            return bid_px
+        if ask_px is not None:
+            return ask_px
 
         return None
 
