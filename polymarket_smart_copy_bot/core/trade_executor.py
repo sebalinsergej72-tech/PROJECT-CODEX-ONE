@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -172,12 +172,10 @@ class TradeExecutor:
 
     @staticmethod
     async def _wallet_current_exposure_usd(session: AsyncSession, wallet_address: str) -> float:
-        since = datetime.now(tz=timezone.utc) - timedelta(hours=24)
         query = (
-            select(func.coalesce(func.sum(CopiedTrade.size_usd), 0.0))
-            .where(CopiedTrade.wallet_address == wallet_address)
-            .where(CopiedTrade.status == TradeStatus.EXECUTED.value)
-            .where(CopiedTrade.copied_at >= since)
+            select(func.coalesce(func.sum(Position.invested_usd), 0.0))
+            .where(Position.wallet_address == wallet_address)
+            .where(Position.is_open.is_(True))
         )
         value = (await session.execute(query)).scalar_one()
         return float(value or 0.0)
@@ -185,6 +183,7 @@ class TradeExecutor:
     @staticmethod
     async def _upsert_position(session: AsyncSession, intent: TradeIntent, executed_size_usd: float) -> None:
         query = select(Position).where(
+            Position.wallet_address == intent.wallet_address,
             Position.market_id == intent.market_id,
             Position.outcome == intent.outcome,
             Position.is_open.is_(True),
@@ -196,6 +195,7 @@ class TradeExecutor:
 
         if position is None:
             position = Position(
+                wallet_address=intent.wallet_address,
                 market_id=intent.market_id,
                 token_id=intent.token_id,
                 outcome=intent.outcome,

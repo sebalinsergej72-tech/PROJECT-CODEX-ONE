@@ -717,6 +717,7 @@ class BackgroundOrchestrator:
         return [
             {
                 "id": row.id,
+                "wallet_address": row.wallet_address,
                 "market_id": row.market_id,
                 "token_id": row.token_id,
                 "outcome": row.outcome,

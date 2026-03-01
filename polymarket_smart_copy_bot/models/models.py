@@ -100,6 +100,7 @@ class Position(Base):
     __tablename__ = "positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wallet_address: Mapped[str] = mapped_column(String(128), nullable=False, index=True, default="unknown")
     market_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     token_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     outcome: Mapped[str] = mapped_column(String(128), nullable=False)
