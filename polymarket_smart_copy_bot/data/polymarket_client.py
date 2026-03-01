@@ -110,6 +110,7 @@ class PolymarketClient:
     async def get_user_trades(self, wallet_address: str, limit: int = 500) -> list[dict[str, Any]]:
         """Fetch raw user trades from data-api, falling back to gamma endpoint."""
 
+        normalized_wallet = self._normalize_address(wallet_address)
         data_api_url = f"{settings.polymarket_data_api_host.rstrip('/')}/v1/trades"
         params_variants = (
             {"user": wallet_address, "limit": limit},
@@ -123,8 +124,9 @@ class PolymarketClient:
             except Exception:
                 continue
             rows = self._coerce_rows(raw)
-            if rows:
-                return rows
+            filtered = self._filter_rows_by_wallet(rows, normalized_wallet)
+            if filtered:
+                return filtered[:limit]
 
         gamma_url = f"{settings.polymarket_gamma_host.rstrip('/')}/trades"
         try:
@@ -132,11 +134,14 @@ class PolymarketClient:
         except Exception as exc:
             logger.warning("Failed to fetch raw trades for {}: {}", wallet_address, exc)
             return []
-        return self._coerce_rows(raw)
+        rows = self._coerce_rows(raw)
+        filtered = self._filter_rows_by_wallet(rows, normalized_wallet)
+        return filtered[:limit]
 
     async def get_user_activity(self, wallet_address: str, limit: int = 500) -> list[dict[str, Any]]:
         """Fetch raw user activity from data-api."""
 
+        normalized_wallet = self._normalize_address(wallet_address)
         url = f"{settings.polymarket_data_api_host.rstrip('/')}/v1/activity"
         params_variants = (
             {"user": wallet_address, "limit": limit},
@@ -149,8 +154,9 @@ class PolymarketClient:
             except Exception:
                 continue
             rows = self._coerce_rows(raw)
-            if rows:
-                return rows
+            filtered = self._filter_rows_by_wallet(rows, normalized_wallet)
+            if filtered:
+                return filtered[:limit]
         return []
 
     async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
@@ -166,7 +172,15 @@ class PolymarketClient:
 
             trade_id = str(item.get("id") or item.get("tradeID") or item.get("tradeId") or "")
             if not trade_id:
-                continue
+                fallback_id = (
+                    f"{item.get('transactionHash', '')}:"
+                    f"{item.get('asset', '')}:"
+                    f"{item.get('conditionId', '')}:"
+                    f"{item.get('timestamp', '')}:"
+                    f"{item.get('side', '')}:"
+                    f"{item.get('size', '')}"
+                )
+                trade_id = fallback_id
 
             market_id = str(item.get("market") or item.get("marketId") or item.get("conditionId") or "")
             if not market_id:
@@ -375,3 +389,46 @@ class PolymarketClient:
                 if isinstance(value, list):
                     return [row for row in value if isinstance(row, dict)]
         return []
+
+    @staticmethod
+    def _normalize_address(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if normalized.startswith("0x") and len(normalized) == 42:
+            return normalized
+        return None
+
+    @classmethod
+    def _extract_wallet_from_row(cls, row: dict[str, Any]) -> str | None:
+        for key in (
+            "proxyWallet",
+            "walletAddress",
+            "address",
+            "user",
+            "owner",
+            "maker",
+            "taker",
+        ):
+            value = row.get(key)
+            normalized = cls._normalize_address(value if isinstance(value, str) else None)
+            if normalized:
+                return normalized
+        return None
+
+    @classmethod
+    def _filter_rows_by_wallet(cls, rows: list[dict[str, Any]], wallet_address: str | None) -> list[dict[str, Any]]:
+        if not wallet_address:
+            return []
+        filtered: list[dict[str, Any]] = []
+        rows_with_wallet = 0
+        for row in rows:
+            row_wallet = cls._extract_wallet_from_row(row)
+            if row_wallet is not None:
+                rows_with_wallet += 1
+            if row_wallet == wallet_address:
+                filtered.append(row)
+        if rows_with_wallet == 0 and rows:
+            # Some endpoints omit wallet fields but still honor the query wallet.
+            return rows
+        return filtered

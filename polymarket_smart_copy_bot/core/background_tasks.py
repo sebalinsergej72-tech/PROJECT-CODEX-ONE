@@ -452,6 +452,8 @@ class BackgroundOrchestrator:
             "enabled_wallets": self._tracked_wallets_count,
             "used_seed_fallback": result.used_seed_fallback if result else False,
             "seed_fallback_wallets": result.seed_fallback_wallets if result else 0,
+            "used_discovered_fallback": result.used_discovered_fallback if result else False,
+            "discovered_fallback_wallets": result.discovered_fallback_wallets if result else 0,
             "mode": result.mode if result else self._risk_mode,
             "report": result.report if result else "",
             "approvals_requested": result.approvals_requested if result else 0,
@@ -587,6 +589,8 @@ class BackgroundOrchestrator:
                     "enabled_wallets": self.wallet_discovery.last_result.enabled_wallets,
                     "used_seed_fallback": self.wallet_discovery.last_result.used_seed_fallback,
                     "seed_fallback_wallets": self.wallet_discovery.last_result.seed_fallback_wallets,
+                    "used_discovered_fallback": self.wallet_discovery.last_result.used_discovered_fallback,
+                    "discovered_fallback_wallets": self.wallet_discovery.last_result.discovered_fallback_wallets,
                     "report": self.wallet_discovery.last_result.report,
                 }
                 if self.wallet_discovery.last_result
@@ -606,6 +610,8 @@ class BackgroundOrchestrator:
                     "enabled_wallets": self._tracked_wallets_count,
                     "used_seed_fallback": False,
                     "seed_fallback_wallets": 0,
+                    "used_discovered_fallback": False,
+                    "discovered_fallback_wallets": 0,
                     "report": "",
                 }
             ),

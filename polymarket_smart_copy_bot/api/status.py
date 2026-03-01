@@ -26,6 +26,8 @@ async def status(request: Request) -> dict:
                 "enabled_wallets": 0,
                 "used_seed_fallback": False,
                 "seed_fallback_wallets": 0,
+                "used_discovered_fallback": False,
+                "discovered_fallback_wallets": 0,
                 "report": "",
             },
         }
