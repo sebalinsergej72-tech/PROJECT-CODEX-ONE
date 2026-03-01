@@ -24,6 +24,14 @@ class CandidateSeed:
     name: str | None = None
     niches: set[str] = field(default_factory=set)
     monthly_pnl_pct: float = 0.0
+    win_rate_hint: float | None = None
+    trades_90d_hint: int | None = None
+    trades_30d_hint: int | None = None
+    profit_factor_hint: float | None = None
+    avg_size_hint: float | None = None
+    last_trade_ts_hint: datetime | None = None
+    consecutive_losses_hint: int | None = None
+    wallet_age_days_hint: int | None = None
 
 
 @dataclass(slots=True)
@@ -77,8 +85,9 @@ class WalletDiscovery:
         if existing is not None:
             return 0
 
-        seeds = load_wallets(settings.resolved_wallets_config_path)
+        seeds = self._load_real_seed_wallets()
         if not seeds:
+            logger.info("Skipped seed import: no real seed wallets configured")
             return 0
 
         enabled_limit = settings.max_wallets_aggressive if settings.risk_mode == "aggressive" else settings.max_qualified_wallets
@@ -105,7 +114,7 @@ class WalletDiscovery:
     async def _ensure_seed_fallback(self, session: AsyncSession) -> int:
         """Ensure fallback wallets from wallets.yaml stay enabled when discovery has no winners."""
 
-        seeds = load_wallets(settings.resolved_wallets_config_path)
+        seeds = self._load_real_seed_wallets()
         if not seeds:
             return await self.count_enabled_wallets(session)
 
@@ -183,6 +192,11 @@ class WalletDiscovery:
 
         top10_addresses = {row.address for row in top10}
         now_dt = utc_now()
+        enabled_limit = (
+            settings.max_wallets_aggressive
+            if settings.risk_mode == "aggressive"
+            else settings.max_qualified_wallets
+        )
         for idx, wallet in enumerate(top10):
             model = existing_by_address.get(wallet.address)
             if model is None:
@@ -190,7 +204,7 @@ class WalletDiscovery:
                 existing_by_address[wallet.address] = model
                 session.add(model)
 
-            should_enable = idx < 6
+            should_enable = idx < enabled_limit
             if should_enable and wallet.address not in previously_enabled and not auto_add:
                 approvals_requested += 1
                 approved = await self._request_top_wallet_approval(wallet)
@@ -310,6 +324,43 @@ class WalletDiscovery:
                 monthly = self._extract_monthly_pnl_pct(row)
                 if abs(monthly) > abs(seed.monthly_pnl_pct):
                     seed.monthly_pnl_pct = monthly
+
+                win_rate = self._extract_win_rate_hint(row)
+                if win_rate is not None and (seed.win_rate_hint is None or win_rate > seed.win_rate_hint):
+                    seed.win_rate_hint = win_rate
+
+                trades_90d = self._extract_trades_90d_hint(row)
+                if trades_90d is not None:
+                    seed.trades_90d_hint = max(seed.trades_90d_hint or 0, trades_90d)
+
+                trades_30d = self._extract_trades_30d_hint(row)
+                if trades_30d is not None:
+                    seed.trades_30d_hint = max(seed.trades_30d_hint or 0, trades_30d)
+
+                pf = self._extract_profit_factor_hint(row)
+                if pf is not None and (seed.profit_factor_hint is None or pf > seed.profit_factor_hint):
+                    seed.profit_factor_hint = pf
+
+                avg_size = self._extract_avg_size_hint(row)
+                if avg_size is not None and (seed.avg_size_hint is None or avg_size > seed.avg_size_hint):
+                    seed.avg_size_hint = avg_size
+
+                last_trade_ts = self._extract_last_trade_ts_hint(row)
+                if last_trade_ts is not None and (
+                    seed.last_trade_ts_hint is None or last_trade_ts > seed.last_trade_ts_hint
+                ):
+                    seed.last_trade_ts_hint = last_trade_ts
+
+                consec_losses = self._extract_consecutive_losses_hint(row)
+                if consec_losses is not None:
+                    if seed.consecutive_losses_hint is None:
+                        seed.consecutive_losses_hint = consec_losses
+                    else:
+                        seed.consecutive_losses_hint = min(seed.consecutive_losses_hint, consec_losses)
+
+                age_days = self._extract_wallet_age_days_hint(row)
+                if age_days is not None:
+                    seed.wallet_age_days_hint = max(seed.wallet_age_days_hint or 0, age_days)
         return candidates
 
     async def _score_candidates(self, seeds: dict[str, CandidateSeed]) -> list[ScoredWallet]:
@@ -337,7 +388,12 @@ class WalletDiscovery:
         raw_activity = await self.polymarket_client.get_user_activity(seed.address, limit=500)
 
         parsed_trades = self._parse_trades(raw_trades)
-        if not parsed_trades:
+        if not parsed_trades and (
+            seed.trades_90d_hint is None
+            or seed.win_rate_hint is None
+            or seed.profit_factor_hint is None
+            or seed.avg_size_hint is None
+        ):
             return None
 
         parsed_trades.sort(key=lambda trade: trade.traded_at, reverse=True)
@@ -347,19 +403,30 @@ class WalletDiscovery:
 
         trades_90d = [trade for trade in parsed_trades if trade.traded_at >= cutoff_90d]
         trades_30d = [trade for trade in parsed_trades if trade.traded_at >= cutoff_30d]
-        if not trades_90d:
+        trades_90d_count = max(len(trades_90d), seed.trades_90d_hint or 0)
+        trades_30d_count = max(len(trades_30d), seed.trades_30d_hint or 0)
+        if trades_90d_count == 0:
             return None
 
-        last_trade_ts = trades_90d[0].traded_at
+        last_trade_ts = trades_90d[0].traded_at if trades_90d else seed.last_trade_ts_hint
+        if last_trade_ts is None:
+            return None
+
         pnl_90d = [trade.pnl_usd for trade in trades_90d if trade.pnl_usd is not None]
         wins = sum(1 for pnl in pnl_90d if pnl > 0)
-        win_rate = wins / len(pnl_90d) if pnl_90d else 0.0
+        win_rate_from_pnl = wins / len(pnl_90d) if pnl_90d else None
 
         gross_profit = sum(pnl for pnl in pnl_90d if pnl > 0)
         gross_loss = abs(sum(pnl for pnl in pnl_90d if pnl < 0))
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (2.5 if gross_profit > 0 else 0.0)
+        pf_from_pnl: float | None = None
+        if pnl_90d:
+            pf_from_pnl = (gross_profit / gross_loss) if gross_loss > 0 else (2.5 if gross_profit > 0 else 0.0)
 
-        avg_size = sum(trade.size_usd for trade in trades_90d) / len(trades_90d)
+        win_rate = win_rate_from_pnl if win_rate_from_pnl is not None else (seed.win_rate_hint or 0.0)
+        profit_factor = pf_from_pnl if pf_from_pnl is not None else (seed.profit_factor_hint or 0.0)
+
+        avg_size_from_trades = (sum(trade.size_usd for trade in trades_90d) / len(trades_90d)) if trades_90d else None
+        avg_size = avg_size_from_trades if avg_size_from_trades is not None else (seed.avg_size_hint or 0.0)
 
         pnl_30d = sum(trade.pnl_usd for trade in trades_30d if trade.pnl_usd is not None)
         volume_30d = sum(trade.size_usd for trade in trades_30d)
@@ -377,12 +444,16 @@ class WalletDiscovery:
                 consecutive_losses += 1
             else:
                 break
+        if consecutive_losses == 0 and seed.consecutive_losses_hint is not None:
+            consecutive_losses = seed.consecutive_losses_hint
 
         wallet_age_days = self._wallet_age_days(raw_activity, parsed_trades, now)
+        if wallet_age_days == 0 and seed.wallet_age_days_hint is not None:
+            wallet_age_days = seed.wallet_age_days_hint
         days_since_last = max((now - last_trade_ts).total_seconds() / 86400, 0.0)
 
         # Hard filters from strategy.
-        if len(trades_90d) < 180:
+        if trades_90d_count < 180:
             return None
         if win_rate < 0.68:
             return None
@@ -400,7 +471,7 @@ class WalletDiscovery:
         score = (
             win_rate * 120
             + monthly_pnl_pct * 80
-            + len(trades_30d) * 0.6
+            + trades_30d_count * 0.6
             + (avg_size / 100)
             + profit_factor * 25
             - days_since_last * 3
@@ -412,12 +483,12 @@ class WalletDiscovery:
             name=seed.name,
             score=score,
             win_rate=win_rate,
-            trades_90d=len(trades_90d),
+            trades_90d=trades_90d_count,
             profit_factor=profit_factor,
             avg_size=avg_size,
             niche=",".join(sorted(seed.niches)) if seed.niches else "overall",
             last_trade_ts=last_trade_ts,
-            trades_30d=len(trades_30d),
+            trades_30d=trades_30d_count,
             monthly_pnl_pct=monthly_pnl_pct,
             consecutive_losses=consecutive_losses,
             wallet_age_days=wallet_age_days,
@@ -501,6 +572,82 @@ class WalletDiscovery:
         return 0.0
 
     @staticmethod
+    def _extract_win_rate_hint(payload: dict[str, Any]) -> float | None:
+        for key in ("winRate", "winrate", "successRate", "hitRate"):
+            if key not in payload:
+                continue
+            value = WalletDiscovery._to_float(payload.get(key))
+            if value <= 0:
+                continue
+            if value > 1.0:
+                value /= 100.0
+            return min(max(value, 0.0), 1.0)
+        return None
+
+    @staticmethod
+    def _extract_trades_90d_hint(payload: dict[str, Any]) -> int | None:
+        for key in ("trades90d", "tradeCount90d", "totalTrades90d", "numTrades90d", "trades_90d"):
+            if key in payload:
+                value = int(WalletDiscovery._to_float(payload.get(key)))
+                if value > 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_trades_30d_hint(payload: dict[str, Any]) -> int | None:
+        for key in ("trades30d", "tradeCount30d", "totalTrades30d", "numTrades30d", "trades"):
+            if key in payload:
+                value = int(WalletDiscovery._to_float(payload.get(key)))
+                if value > 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_profit_factor_hint(payload: dict[str, Any]) -> float | None:
+        for key in ("profitFactor", "pf"):
+            if key in payload:
+                value = WalletDiscovery._to_float(payload.get(key))
+                if value > 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_avg_size_hint(payload: dict[str, Any]) -> float | None:
+        for key in ("avgSize", "avgPositionSize", "averagePositionSize", "avgTradeSize"):
+            if key in payload:
+                value = WalletDiscovery._to_float(payload.get(key))
+                if value > 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_last_trade_ts_hint(payload: dict[str, Any]) -> datetime | None:
+        for key in ("lastTradeTs", "lastTradeAt", "latestTradeAt", "lastActiveAt"):
+            if key in payload:
+                parsed = WalletDiscovery._extract_timestamp(payload.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    @staticmethod
+    def _extract_consecutive_losses_hint(payload: dict[str, Any]) -> int | None:
+        for key in ("consecutiveLosses", "consecLosses"):
+            if key in payload:
+                value = int(WalletDiscovery._to_float(payload.get(key)))
+                if value >= 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_wallet_age_days_hint(payload: dict[str, Any]) -> int | None:
+        for key in ("walletAgeDays", "ageDays", "daysActive"):
+            if key in payload:
+                value = int(WalletDiscovery._to_float(payload.get(key)))
+                if value > 0:
+                    return value
+        return None
+
+    @staticmethod
     def _extract_timestamp(value: Any) -> datetime | None:
         if value is None:
             return None
@@ -525,3 +672,24 @@ class WalletDiscovery:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _is_placeholder_seed_address(address: str) -> bool:
+        normalized = address.lower()
+        if not (normalized.startswith("0x") and len(normalized) == 42):
+            return False
+        body = normalized[2:]
+        return len(set(body)) == 1
+
+    def _load_real_seed_wallets(self) -> list:
+        seeds = load_wallets(settings.resolved_wallets_config_path)
+        if not seeds:
+            return []
+        filtered = [wallet for wallet in seeds if not self._is_placeholder_seed_address(wallet.address)]
+        if len(filtered) != len(seeds):
+            logger.warning(
+                "Filtered placeholder seed wallets: {} skipped, {} usable",
+                len(seeds) - len(filtered),
+                len(filtered),
+            )
+        return filtered
