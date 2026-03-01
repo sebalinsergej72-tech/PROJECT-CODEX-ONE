@@ -9,7 +9,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import settings
+from config.settings import RiskMode, settings
 from data.polymarket_client import PolymarketClient
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import load_wallets, utc_now
@@ -70,6 +70,17 @@ class DiscoveryResult:
     ran_at: datetime
 
 
+@dataclass(slots=True)
+class DiscoveryThresholds:
+    min_trades_90d: int
+    min_win_rate: float
+    min_profit_factor: float
+    min_avg_size: float
+    max_days_since_last_trade: int
+    max_consecutive_losses: int
+    min_wallet_age_days: int
+
+
 class WalletDiscovery:
     """Automatic wallet discovery + scoring with optional human approval."""
 
@@ -78,7 +89,7 @@ class WalletDiscovery:
         self.notifications = notifications
         self.last_result: DiscoveryResult | None = None
 
-    async def import_seed_wallets(self, session: AsyncSession) -> int:
+    async def import_seed_wallets(self, session: AsyncSession, risk_mode: RiskMode | None = None) -> int:
         """Import wallets.yaml into qualified_wallets as fallback seed set."""
 
         existing = (await session.execute(select(QualifiedWallet))).scalars().first()
@@ -90,7 +101,8 @@ class WalletDiscovery:
             logger.info("Skipped seed import: no real seed wallets configured")
             return 0
 
-        enabled_limit = settings.max_wallets_aggressive if settings.risk_mode == "aggressive" else settings.max_qualified_wallets
+        mode = risk_mode or settings.risk_mode
+        enabled_limit = self._enabled_limit_for_mode(mode)
         now = utc_now()
         for idx, wallet in enumerate(seeds):
             row = QualifiedWallet(
@@ -111,7 +123,7 @@ class WalletDiscovery:
         logger.info("Imported {} seed wallets from wallets.yaml", len(seeds))
         return len(seeds)
 
-    async def _ensure_seed_fallback(self, session: AsyncSession) -> int:
+    async def _ensure_seed_fallback(self, session: AsyncSession, risk_mode: RiskMode) -> int:
         """Ensure fallback wallets from wallets.yaml stay enabled when discovery has no winners."""
 
         seeds = self._load_real_seed_wallets()
@@ -121,7 +133,7 @@ class WalletDiscovery:
                 logger.info("Disabled {} placeholder seed wallets in DB", disabled)
             return await self.count_enabled_wallets(session)
 
-        enabled_limit = settings.max_wallets_aggressive if settings.risk_mode == "aggressive" else settings.max_qualified_wallets
+        enabled_limit = self._enabled_limit_for_mode(risk_mode)
         now = utc_now()
         real_seed_addresses = {wallet.address.lower() for wallet in seeds}
         for idx, wallet in enumerate(seeds):
@@ -161,13 +173,21 @@ class WalletDiscovery:
 
         return await self.count_enabled_wallets(session)
 
-    async def discover_and_score(self, session: AsyncSession, *, auto_add: bool) -> DiscoveryResult:
+    async def discover_and_score(
+        self,
+        session: AsyncSession,
+        *,
+        auto_add: bool,
+        risk_mode: RiskMode | None = None,
+    ) -> DiscoveryResult:
         """Run leaderboard discovery, apply hard filters, score, persist top wallets."""
 
         now = utc_now()
+        mode = risk_mode or settings.risk_mode
+        thresholds = self._thresholds_for_mode(mode)
         candidates = await self._fetch_candidate_seeds()
         if not candidates:
-            fallback_enabled = await self._ensure_seed_fallback(session)
+            fallback_enabled = await self._ensure_seed_fallback(session, mode)
             result = DiscoveryResult(0, 0, 0, fallback_enabled, 0, 0, 0, now)
             self.last_result = result
             logger.warning(
@@ -176,12 +196,12 @@ class WalletDiscovery:
             )
             return result
 
-        scored = await self._score_candidates(candidates)
+        scored = await self._score_candidates(candidates, thresholds)
         scored.sort(key=lambda row: row.score, reverse=True)
 
         top10 = scored[:10]
         if not top10:
-            fallback_enabled = await self._ensure_seed_fallback(session)
+            fallback_enabled = await self._ensure_seed_fallback(session, mode)
             result = DiscoveryResult(
                 scanned_candidates=len(candidates),
                 passed_filters=0,
@@ -216,11 +236,7 @@ class WalletDiscovery:
 
         top10_addresses = {row.address for row in top10}
         now_dt = utc_now()
-        enabled_limit = (
-            settings.max_wallets_aggressive
-            if settings.risk_mode == "aggressive"
-            else settings.max_qualified_wallets
-        )
+        enabled_limit = self._enabled_limit_for_mode(mode)
         for idx, wallet in enumerate(top10):
             model = existing_by_address.get(wallet.address)
             if model is None:
@@ -387,13 +403,17 @@ class WalletDiscovery:
                     seed.wallet_age_days_hint = max(seed.wallet_age_days_hint or 0, age_days)
         return candidates
 
-    async def _score_candidates(self, seeds: dict[str, CandidateSeed]) -> list[ScoredWallet]:
+    async def _score_candidates(
+        self,
+        seeds: dict[str, CandidateSeed],
+        thresholds: DiscoveryThresholds,
+    ) -> list[ScoredWallet]:
         limiter = asyncio.Semaphore(8)
         now = utc_now()
 
         async def run(seed: CandidateSeed) -> ScoredWallet | None:
             async with limiter:
-                return await self._score_single_wallet(seed, now)
+                return await self._score_single_wallet(seed, now, thresholds)
 
         tasks = [run(seed) for seed in seeds.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -407,7 +427,12 @@ class WalletDiscovery:
                 scored.append(result)
         return scored
 
-    async def _score_single_wallet(self, seed: CandidateSeed, now: datetime) -> ScoredWallet | None:
+    async def _score_single_wallet(
+        self,
+        seed: CandidateSeed,
+        now: datetime,
+        thresholds: DiscoveryThresholds,
+    ) -> ScoredWallet | None:
         raw_trades = await self.polymarket_client.get_user_trades(seed.address, limit=500)
         raw_activity = await self.polymarket_client.get_user_activity(seed.address, limit=500)
 
@@ -423,7 +448,6 @@ class WalletDiscovery:
         parsed_trades.sort(key=lambda trade: trade.traded_at, reverse=True)
         cutoff_90d = now - timedelta(days=90)
         cutoff_30d = now - timedelta(days=30)
-        cutoff_7d = now - timedelta(days=7)
 
         trades_90d = [trade for trade in parsed_trades if trade.traded_at >= cutoff_90d]
         trades_30d = [trade for trade in parsed_trades if trade.traded_at >= cutoff_30d]
@@ -477,19 +501,19 @@ class WalletDiscovery:
         days_since_last = max((now - last_trade_ts).total_seconds() / 86400, 0.0)
 
         # Hard filters from strategy.
-        if trades_90d_count < 180:
+        if trades_90d_count < thresholds.min_trades_90d:
             return None
-        if win_rate < 0.68:
+        if win_rate < thresholds.min_win_rate:
             return None
-        if profit_factor < 1.8:
+        if profit_factor < thresholds.min_profit_factor:
             return None
-        if avg_size <= 600:
+        if avg_size <= thresholds.min_avg_size:
             return None
-        if last_trade_ts <= cutoff_7d:
+        if days_since_last > thresholds.max_days_since_last_trade:
             return None
-        if consecutive_losses >= 4:
+        if consecutive_losses > thresholds.max_consecutive_losses:
             return None
-        if wallet_age_days < 45:
+        if wallet_age_days < thresholds.min_wallet_age_days:
             return None
 
         score = (
@@ -728,3 +752,29 @@ class WalletDiscovery:
                 len(filtered),
             )
         return filtered
+
+    @staticmethod
+    def _enabled_limit_for_mode(risk_mode: RiskMode) -> int:
+        return settings.max_wallets_aggressive if risk_mode == "aggressive" else settings.max_qualified_wallets
+
+    @staticmethod
+    def _thresholds_for_mode(risk_mode: RiskMode) -> DiscoveryThresholds:
+        if risk_mode == "aggressive":
+            return DiscoveryThresholds(
+                min_trades_90d=settings.discovery_min_trades_aggressive,
+                min_win_rate=settings.discovery_min_winrate_aggressive,
+                min_profit_factor=settings.discovery_min_profit_factor_aggressive,
+                min_avg_size=settings.discovery_min_avg_size_aggressive,
+                max_days_since_last_trade=settings.discovery_max_days_since_last_trade_aggressive,
+                max_consecutive_losses=settings.discovery_max_consecutive_losses_aggressive,
+                min_wallet_age_days=settings.discovery_min_wallet_age_days_aggressive,
+            )
+        return DiscoveryThresholds(
+            min_trades_90d=settings.discovery_min_trades_conservative,
+            min_win_rate=settings.discovery_min_winrate_conservative,
+            min_profit_factor=settings.discovery_min_profit_factor_conservative,
+            min_avg_size=settings.discovery_min_avg_size_conservative,
+            max_days_since_last_trade=settings.discovery_max_days_since_last_trade_conservative,
+            max_consecutive_losses=settings.discovery_max_consecutive_losses_conservative,
+            min_wallet_age_days=settings.discovery_min_wallet_age_days_conservative,
+        )

@@ -282,11 +282,15 @@ class BackgroundOrchestrator:
                 return None
 
     async def _seed_wallets(self, session: AsyncSession) -> None:
-        await self.wallet_discovery.import_seed_wallets(session)
+        await self.wallet_discovery.import_seed_wallets(session, risk_mode=self._risk_mode)
         self._tracked_wallets_count = await self.wallet_discovery.count_enabled_wallets(session)
 
     async def _wallet_discovery_refresh(self, session: AsyncSession) -> None:
-        result = await self.wallet_discovery.discover_and_score(session, auto_add=self._discovery_autoadd_enabled)
+        result = await self.wallet_discovery.discover_and_score(
+            session,
+            auto_add=self._discovery_autoadd_enabled,
+            risk_mode=self._risk_mode,
+        )
         self._tracked_wallets_count = await self.wallet_discovery.count_enabled_wallets(session)
         self.last_wallet_refresh_at = datetime.now(tz=timezone.utc)
 
