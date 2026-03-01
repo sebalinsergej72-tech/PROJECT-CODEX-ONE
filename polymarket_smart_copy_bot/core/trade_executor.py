@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode
@@ -59,11 +60,6 @@ class TradeExecutor:
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
     ) -> None:
-        query = select(CopiedTrade).where(CopiedTrade.external_trade_id == intent.external_trade_id)
-        existing = (await session.execute(query)).scalar_one_or_none()
-        if existing is not None:
-            return
-
         copied_trade = CopiedTrade(
             external_trade_id=intent.external_trade_id,
             wallet_address=intent.wallet_address,
@@ -76,8 +72,16 @@ class TradeExecutor:
             status=TradeStatus.PENDING.value,
             source_timestamp=datetime.now(tz=timezone.utc),
         )
-        session.add(copied_trade)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(copied_trade)
+                await session.flush()
+        except IntegrityError as exc:
+            # Cross-worker race: the same external trade can be inserted concurrently.
+            if self._is_duplicate_external_trade(exc):
+                logger.debug("Duplicate trade ignored: {}", intent.external_trade_id)
+                return
+            raise
 
         wallet_current_exposure = await self._wallet_current_exposure_usd(session, intent.wallet_address)
 
@@ -129,6 +133,11 @@ class TradeExecutor:
                     intent.external_trade_id,
                     intent.token_id,
                 )
+                return
+            if error_text == "insufficient_balance_allowance":
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "insufficient_balance_allowance"
+                logger.warning("Trade {} skipped: insufficient balance/allowance", intent.external_trade_id)
                 return
 
             copied_trade.status = TradeStatus.FAILED.value
@@ -236,3 +245,13 @@ class TradeExecutor:
         position.current_price_cents = intent.source_price_cents
         position.side = TradeSide.BUY.value if side == "buy" else TradeSide.SELL.value
         position.updated_at = datetime.now(tz=timezone.utc)
+
+    @staticmethod
+    def _is_duplicate_external_trade(exc: IntegrityError) -> bool:
+        text = str(exc).lower()
+        return (
+            "uq_copied_trades_external_trade_id" in text
+            or "duplicate key value" in text
+            or "external_trade_id" in text
+            or "unique constraint failed: copied_trades.external_trade_id" in text
+        )

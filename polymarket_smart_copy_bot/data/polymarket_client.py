@@ -329,6 +329,14 @@ class PolymarketClient:
                     tx_hash=None,
                     error=f"orderbook_not_found:{request.token_id}",
                 )
+            if "not enough balance / allowance" in text:
+                logger.warning("Insufficient balance/allowance for token_id={} market_id={}", request.token_id, request.market_id)
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    tx_hash=None,
+                    error="insufficient_balance_allowance",
+                )
             logger.exception("Order placement failed")
             return OrderResult(success=False, order_id=None, tx_hash=None, error=str(exc))
 
