@@ -53,6 +53,13 @@ class PolymarketClient:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
         self._clob_client: Any = None
+        self._dry_run = settings.dry_run
+
+    def set_dry_run(self, enabled: bool) -> None:
+        self._dry_run = enabled
+
+    def is_dry_run(self) -> bool:
+        return self._dry_run
 
     async def start(self) -> None:
         if self._session is None:
@@ -268,7 +275,7 @@ class PolymarketClient:
     async def fetch_account_balance_usd(self) -> float | None:
         """Fetch current account balance for capital recalculation."""
 
-        if settings.dry_run:
+        if self._dry_run:
             return settings.default_starting_equity
 
         if not settings.polymarket_private_key:
@@ -283,7 +290,7 @@ class PolymarketClient:
     async def place_order(self, request: OrderRequest) -> OrderResult:
         """Place an order through py-clob-client or simulate in DRY_RUN mode."""
 
-        if settings.dry_run:
+        if self._dry_run:
             simulated_id = f"dry-{int(datetime.now(tz=timezone.utc).timestamp())}"
             return OrderResult(success=True, order_id=simulated_id, tx_hash=simulated_id)
 

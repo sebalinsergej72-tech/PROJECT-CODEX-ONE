@@ -23,6 +23,10 @@ class BooleanControlRequest(BaseModel):
     enabled: bool
 
 
+class EngineControlRequest(BaseModel):
+    dry_run: bool
+
+
 def _assert_write_access(token: str | None) -> None:
     required = settings.dashboard_write_token
     if not required:
@@ -135,3 +139,19 @@ async def control_autoadd(
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_autoadd(payload.enabled)
     return {"status": "ok", "discovery_autoadd": status.get("discovery_autoadd", payload.enabled)}
+
+
+@router.post("/control/engine")
+async def control_engine(
+    payload: EngineControlRequest,
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    status = await orchestrator.set_dry_run(payload.dry_run)
+    return {
+        "status": "ok",
+        "dry_run": status.get("dry_run", payload.dry_run),
+        "engine": "paper" if status.get("dry_run", payload.dry_run) else "live",
+    }

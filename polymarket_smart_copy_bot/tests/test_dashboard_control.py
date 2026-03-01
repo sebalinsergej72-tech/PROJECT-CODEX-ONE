@@ -11,6 +11,7 @@ from config.settings import settings
 class DummyOrchestrator:
     def __init__(self) -> None:
         self._enabled = True
+        self._dry_run = True
         self._mode = "aggressive"
         self._boost = True
         self._price_filter = False
@@ -39,6 +40,10 @@ class DummyOrchestrator:
         self._autoadd = enabled
         return {"discovery_autoadd": self._autoadd}
 
+    async def set_dry_run(self, enabled: bool) -> dict:
+        self._dry_run = enabled
+        return {"dry_run": self._dry_run}
+
 
 def test_dashboard_page_renders() -> None:
     app = FastAPI()
@@ -51,6 +56,8 @@ def test_dashboard_page_renders() -> None:
     assert "Polymarket Smart Copy Bot" in response.text
     assert "Start Trading" in response.text
     assert "Stop Trading" in response.text
+    assert "Paper Mode" in response.text
+    assert "Live Mode" in response.text
 
 
 def test_control_trading_toggles() -> None:
@@ -111,3 +118,20 @@ def test_control_runtime_switches() -> None:
     assert price_filter.json()["price_filter_enabled"] is True
     assert autoadd.status_code == 200
     assert autoadd.json()["discovery_autoadd"] is True
+
+
+def test_control_engine_switch() -> None:
+    app = FastAPI()
+    app.include_router(control_router)
+    app.state.orchestrator = DummyOrchestrator()
+
+    with TestClient(app) as client:
+        live = client.post("/control/engine", json={"dry_run": False})
+        paper = client.post("/control/engine", json={"dry_run": True})
+
+    assert live.status_code == 200
+    assert live.json()["dry_run"] is False
+    assert live.json()["engine"] == "live"
+    assert paper.status_code == 200
+    assert paper.json()["dry_run"] is True
+    assert paper.json()["engine"] == "paper"

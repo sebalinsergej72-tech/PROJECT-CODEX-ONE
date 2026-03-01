@@ -65,6 +65,7 @@ class BackgroundOrchestrator:
     RUNTIME_KEY_CONSERVATIVE_SUGGESTED = "runtime_conservative_suggested"
     RUNTIME_KEY_DISCOVERY_AUTOADD = "runtime_discovery_autoadd"
     RUNTIME_KEY_TRADING_ENABLED = "runtime_trading_enabled"
+    RUNTIME_KEY_DRY_RUN = "runtime_dry_run"
 
     def __init__(self) -> None:
         self.polymarket_client = PolymarketClient()
@@ -74,6 +75,7 @@ class BackgroundOrchestrator:
         )
 
         self._risk_mode: RiskMode = settings.risk_mode
+        self._dry_run: bool = settings.dry_run
         self._price_filter_enabled: bool = not settings.disable_price_filter
         self._high_conviction_boost_enabled: bool = True
         self._discovery_autoadd_enabled: bool = settings.discovery_autoadd_default
@@ -99,6 +101,7 @@ class BackgroundOrchestrator:
             timezone=settings.timezone,
             jobstores={"default": SQLAlchemyJobStore(url=get_scheduler_jobstore_url())},
         )
+        self.polymarket_client.set_dry_run(self._dry_run)
 
         self.started_at = datetime.now(tz=timezone.utc)
         self.last_wallet_refresh_at: datetime | None = None
@@ -136,6 +139,9 @@ class BackgroundOrchestrator:
 
     def is_trading_enabled(self) -> bool:
         return self._trading_enabled
+
+    def is_dry_run(self) -> bool:
+        return self._dry_run
 
     async def start(self) -> None:
         global _ORCHESTRATOR_INSTANCE
@@ -383,6 +389,11 @@ class BackgroundOrchestrator:
         if trading_enabled is not None:
             self._trading_enabled = trading_enabled
 
+        runtime_dry_run = await self._get_runtime_bool(session, self.RUNTIME_KEY_DRY_RUN)
+        if runtime_dry_run is not None:
+            self._dry_run = runtime_dry_run
+            self.polymarket_client.set_dry_run(runtime_dry_run)
+
     async def set_mode(self, mode: RiskMode) -> dict:
         self._risk_mode = mode
         await self._in_session(
@@ -425,6 +436,17 @@ class BackgroundOrchestrator:
             await self.notifications.send_message("Trading is ENABLED from dashboard/API.")
         else:
             await self.notifications.send_message("Trading is PAUSED from dashboard/API.")
+        return await self.get_status()
+
+    async def set_dry_run(self, enabled: bool) -> dict:
+        self._dry_run = enabled
+        self.polymarket_client.set_dry_run(enabled)
+        await self._in_session(
+            "set_dry_run",
+            lambda session: self._set_runtime_bool(session, self.RUNTIME_KEY_DRY_RUN, enabled),
+        )
+        engine = "PAPER (DRY RUN)" if enabled else "LIVE"
+        await self.notifications.send_message(f"Engine mode switched to {engine} from dashboard/API.")
         return await self.get_status()
 
     async def get_discovery_status(self) -> dict[str, Any]:
@@ -546,7 +568,7 @@ class BackgroundOrchestrator:
             }
 
         return {
-            "dry_run": settings.dry_run,
+            "dry_run": self._dry_run,
             "risk_mode": self._risk_mode,
             "price_filter_enabled": self._price_filter_enabled,
             "short_term_markets_enabled": settings.enable_short_term_markets,

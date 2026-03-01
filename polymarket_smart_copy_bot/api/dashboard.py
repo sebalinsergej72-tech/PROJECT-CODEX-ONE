@@ -50,6 +50,8 @@ async def dashboard() -> HTMLResponse:
     button {{ border: 0; border-radius: 10px; padding: 10px 14px; font-weight: 700; cursor: pointer; }}
     .start {{ background: var(--good); color:#062612; }}
     .stop {{ background: var(--bad); color:#32080d; }}
+    .paper {{ background: #f5b85a; color:#2a1a05; }}
+    .live {{ background: #ff8b4f; color:#2d1000; }}
     .refresh {{ background: var(--accent); color:#041535; }}
     input {{ border:1px solid #2a3c71; border-radius:8px; background:#0f1730; color:var(--text); padding:8px 10px; min-width:220px; }}
     table {{ width:100%; border-collapse:collapse; }}
@@ -67,6 +69,8 @@ async def dashboard() -> HTMLResponse:
     <div class=\"controls\">
       <button id=\"btnStart\" class=\"start\" onclick=\"setTrading(true)\">Start Trading</button>
       <button id=\"btnStop\" class=\"stop\" onclick=\"setTrading(false)\">Stop Trading</button>
+      <button id=\"btnPaper\" class=\"paper\" onclick=\"setEngine(true)\">Paper Mode</button>
+      <button id=\"btnLive\" class=\"live\" onclick=\"setEngine(false)\">Live Mode</button>
       <button class=\"refresh\" onclick=\"loadAll()\">Refresh now</button>
       <input id=\"token\" type=\"password\" placeholder=\"Dashboard write token (optional)\" />
       <span id=\"msg\" class=\"muted\"></span>
@@ -220,11 +224,19 @@ function renderStatus(s) {{
 
   const startBtn = document.getElementById('btnStart');
   const stopBtn = document.getElementById('btnStop');
+  const paperBtn = document.getElementById('btnPaper');
+  const liveBtn = document.getElementById('btnLive');
   if (startBtn && stopBtn) {{
     startBtn.disabled = trading;
     stopBtn.disabled = !trading;
     startBtn.style.opacity = trading ? '0.55' : '1';
     stopBtn.style.opacity = !trading ? '0.55' : '1';
+  }}
+  if (paperBtn && liveBtn) {{
+    paperBtn.disabled = dry;
+    liveBtn.disabled = !dry;
+    paperBtn.style.opacity = dry ? '0.55' : '1';
+    liveBtn.style.opacity = !dry ? '0.55' : '1';
   }}
 
   const banner = document.getElementById('runtimeBanner');
@@ -316,6 +328,29 @@ async function setTrading(enabled) {{
 
     const data = await postControl('/control/trading', {{enabled, run_now: enabled}});
     setMsg(`Trading: ${{data.trading_enabled ? 'ENABLED' : 'PAUSED'}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function setEngine(dryRun) {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) {{
+      localStorage.setItem('dashboard_write_token', tokenInput);
+    }}
+
+    if (!requireTokenIfNeeded()) {{
+      return;
+    }}
+    if (!dryRun) {{
+      const ok = window.confirm('Переключить в LIVE MODE? Это реальная торговля.');
+      if (!ok) return;
+    }}
+
+    const data = await postControl('/control/engine', {{dry_run: dryRun}});
+    setMsg(`Engine: ${{data.dry_run ? 'PAPER' : 'LIVE'}}`);
     await loadAll();
   }} catch (err) {{
     setMsg(`Action failed: ${{err.message || err}}`, true);
