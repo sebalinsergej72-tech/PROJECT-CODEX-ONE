@@ -16,6 +16,7 @@ class PortfolioTracker:
     """Tracks open positions and persists portfolio snapshots for status/PnL."""
 
     CAPITAL_BASE_KEY = "capital_base_usd"
+    INITIAL_CAPITAL_KEY = "initial_capital_usd"
 
     def __init__(self, polymarket_client: PolymarketClient) -> None:
         self.polymarket_client = polymarket_client
@@ -26,7 +27,12 @@ class PortfolioTracker:
 
         base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
         if base is None:
-            await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, settings.default_starting_equity)
+            base = settings.default_starting_equity
+            await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, base)
+
+        initial_capital = await self._get_runtime_float(session, self.INITIAL_CAPITAL_KEY)
+        if initial_capital is None:
+            await self._set_runtime_float(session, self.INITIAL_CAPITAL_KEY, settings.default_starting_equity)
 
         logger.info("Recovered {} open positions from DB", count)
         return count
@@ -52,6 +58,10 @@ class PortfolioTracker:
 
     async def recalculate_capital_base(self, session: AsyncSession, risk_mode: RiskMode) -> float:
         """Recalculate base capital from API and apply auto-reinvest when enabled."""
+
+        initial_capital = await self._get_runtime_float(session, self.INITIAL_CAPITAL_KEY)
+        if initial_capital is None:
+            await self._set_runtime_float(session, self.INITIAL_CAPITAL_KEY, settings.default_starting_equity)
 
         current_base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
         if current_base is None:
@@ -80,8 +90,13 @@ class PortfolioTracker:
         if capital_base is None:
             capital_base = settings.default_starting_equity
 
-        cumulative_pnl = realized + unrealized
-        total_equity = capital_base + cumulative_pnl
+        initial_capital = await self._get_runtime_float(session, self.INITIAL_CAPITAL_KEY)
+        if initial_capital is None:
+            initial_capital = settings.default_starting_equity
+
+        current_delta = realized + unrealized
+        total_equity = capital_base + current_delta
+        cumulative_pnl = total_equity - initial_capital
         available_cash = max(total_equity - exposure, 0.0)
 
         daily_pnl, daily_drawdown_pct = await self._compute_daily_drawdown(session, total_equity)
