@@ -116,10 +116,14 @@ class WalletDiscovery:
 
         seeds = self._load_real_seed_wallets()
         if not seeds:
+            disabled = await self._disable_placeholder_seed_wallets(session)
+            if disabled > 0:
+                logger.info("Disabled {} placeholder seed wallets in DB", disabled)
             return await self.count_enabled_wallets(session)
 
         enabled_limit = settings.max_wallets_aggressive if settings.risk_mode == "aggressive" else settings.max_qualified_wallets
         now = utc_now()
+        real_seed_addresses = {wallet.address.lower() for wallet in seeds}
         for idx, wallet in enumerate(seeds):
             normalized = wallet.address.lower()
             row = (
@@ -147,6 +151,14 @@ class WalletDiscovery:
             row.niche = row.niche or "seed"
             row.updated_at = now
 
+        stale_seed_rows = (
+            await session.execute(select(QualifiedWallet).where(QualifiedWallet.niche == "seed"))
+        ).scalars().all()
+        for row in stale_seed_rows:
+            if row.address not in real_seed_addresses:
+                row.enabled = False
+                row.updated_at = now
+
         return await self.count_enabled_wallets(session)
 
     async def discover_and_score(self, session: AsyncSession, *, auto_add: bool) -> DiscoveryResult:
@@ -155,8 +167,13 @@ class WalletDiscovery:
         now = utc_now()
         candidates = await self._fetch_candidate_seeds()
         if not candidates:
-            result = DiscoveryResult(0, 0, 0, await self.count_enabled_wallets(session), 0, 0, 0, now)
+            fallback_enabled = await self._ensure_seed_fallback(session)
+            result = DiscoveryResult(0, 0, 0, fallback_enabled, 0, 0, 0, now)
             self.last_result = result
+            logger.warning(
+                "Discovery returned no candidates from leaderboard. enabled_wallets={}",
+                fallback_enabled,
+            )
             return result
 
         scored = await self._score_candidates(candidates)
@@ -176,10 +193,17 @@ class WalletDiscovery:
                 ran_at=now,
             )
             self.last_result = result
-            logger.warning(
-                "Discovery yielded no qualified wallets; using seed fallback enabled={}",
-                fallback_enabled,
-            )
+            real_seeds = self._load_real_seed_wallets(log_filter=False)
+            if real_seeds:
+                logger.warning(
+                    "Discovery yielded no qualified wallets; using seed fallback enabled={}",
+                    fallback_enabled,
+                )
+            else:
+                logger.warning(
+                    "Discovery yielded no qualified wallets and no real seed fallback is configured. enabled_wallets={}",
+                    fallback_enabled,
+                )
             return result
 
         all_existing = (await session.execute(select(QualifiedWallet))).scalars().all()
@@ -681,12 +705,23 @@ class WalletDiscovery:
         body = normalized[2:]
         return len(set(body)) == 1
 
-    def _load_real_seed_wallets(self) -> list:
+    async def _disable_placeholder_seed_wallets(self, session: AsyncSession) -> int:
+        rows = (await session.execute(select(QualifiedWallet))).scalars().all()
+        disabled = 0
+        now = utc_now()
+        for row in rows:
+            if self._is_placeholder_seed_address(row.address) and row.enabled:
+                row.enabled = False
+                row.updated_at = now
+                disabled += 1
+        return disabled
+
+    def _load_real_seed_wallets(self, *, log_filter: bool = True) -> list:
         seeds = load_wallets(settings.resolved_wallets_config_path)
         if not seeds:
             return []
         filtered = [wallet for wallet in seeds if not self._is_placeholder_seed_address(wallet.address)]
-        if len(filtered) != len(seeds):
+        if log_filter and len(filtered) != len(seeds):
             logger.warning(
                 "Filtered placeholder seed wallets: {} skipped, {} usable",
                 len(seeds) - len(filtered),
