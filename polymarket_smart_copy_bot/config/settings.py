@@ -69,35 +69,31 @@ class Settings(BaseSettings):
 
     wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")
     discovery_autoadd_default: bool = Field(default=True, alias="DISCOVERY_AUTOADD")
+    # === DISCOVERY FILTERS ===
+    # Aggressive (default)
     discovery_min_trades_aggressive: int = Field(default=120, alias="DISCOVERY_MIN_TRADES_AGGRESSIVE")
     discovery_min_winrate_aggressive: float = Field(default=0.65, alias="DISCOVERY_MIN_WINRATE_AGGRESSIVE")
     discovery_min_profit_factor_aggressive: float = Field(
         default=1.55, alias="DISCOVERY_MIN_PROFIT_FACTOR_AGGRESSIVE"
     )
     discovery_min_avg_size_aggressive: float = Field(default=350.0, alias="DISCOVERY_MIN_AVG_SIZE_AGGRESSIVE")
+    discovery_max_consec_losses_aggressive: int = Field(default=5, alias="DISCOVERY_MAX_CONSEC_LOSSES_AGGRESSIVE")
+    discovery_min_wallet_age_aggressive: int = Field(default=30, alias="DISCOVERY_MIN_WALLET_AGE_AGGRESSIVE")
+
+    # Conservative
+    discovery_min_trades_cons: int = Field(default=160, alias="DISCOVERY_MIN_TRADES_CONS")
+    discovery_min_winrate_cons: float = Field(default=0.69, alias="DISCOVERY_MIN_WINRATE_CONS")
+    discovery_min_profit_factor_cons: float = Field(default=1.75, alias="DISCOVERY_MIN_PROFIT_FACTOR_CONS")
+    discovery_min_avg_size_cons: float = Field(default=550.0, alias="DISCOVERY_MIN_AVG_SIZE_CONS")
+    discovery_max_consec_losses_cons: int = Field(default=4, alias="DISCOVERY_MAX_CONSEC_LOSSES_CONS")
+    discovery_min_wallet_age_cons: int = Field(default=45, alias="DISCOVERY_MIN_WALLET_AGE_CONS")
+
+    # Recency filters kept explicit by mode
     discovery_max_days_since_last_trade_aggressive: int = Field(
         default=7, alias="DISCOVERY_MAX_DAYS_SINCE_LAST_TRADE_AGGRESSIVE"
     )
-    discovery_max_consecutive_losses_aggressive: int = Field(
-        default=4, alias="DISCOVERY_MAX_CONSECUTIVE_LOSSES_AGGRESSIVE"
-    )
-    discovery_min_wallet_age_days_aggressive: int = Field(
-        default=30, alias="DISCOVERY_MIN_WALLET_AGE_DAYS_AGGRESSIVE"
-    )
-    discovery_min_trades_conservative: int = Field(default=160, alias="DISCOVERY_MIN_TRADES_CONSERVATIVE")
-    discovery_min_winrate_conservative: float = Field(default=0.69, alias="DISCOVERY_MIN_WINRATE_CONSERVATIVE")
-    discovery_min_profit_factor_conservative: float = Field(
-        default=1.75, alias="DISCOVERY_MIN_PROFIT_FACTOR_CONSERVATIVE"
-    )
-    discovery_min_avg_size_conservative: float = Field(default=550.0, alias="DISCOVERY_MIN_AVG_SIZE_CONSERVATIVE")
     discovery_max_days_since_last_trade_conservative: int = Field(
         default=5, alias="DISCOVERY_MAX_DAYS_SINCE_LAST_TRADE_CONSERVATIVE"
-    )
-    discovery_max_consecutive_losses_conservative: int = Field(
-        default=3, alias="DISCOVERY_MAX_CONSECUTIVE_LOSSES_CONSERVATIVE"
-    )
-    discovery_min_wallet_age_days_conservative: int = Field(
-        default=45, alias="DISCOVERY_MIN_WALLET_AGE_DAYS_CONSERVATIVE"
     )
     trade_monitor_interval_seconds: int = Field(default=60, alias="TRADE_MONITOR_INTERVAL_SECONDS")
     portfolio_refresh_seconds: int = Field(default=300, alias="PORTFOLIO_REFRESH_SECONDS")
@@ -132,6 +128,39 @@ class Settings(BaseSettings):
     @property
     def conservative_max_total_exposure_pct(self) -> float:
         return 0.35
+
+    # Backward-compatible aliases used by older modules/env names.
+    @property
+    def discovery_max_consecutive_losses_aggressive(self) -> int:
+        return self.discovery_max_consec_losses_aggressive
+
+    @property
+    def discovery_min_wallet_age_days_aggressive(self) -> int:
+        return self.discovery_min_wallet_age_aggressive
+
+    @property
+    def discovery_min_trades_conservative(self) -> int:
+        return self.discovery_min_trades_cons
+
+    @property
+    def discovery_min_winrate_conservative(self) -> float:
+        return self.discovery_min_winrate_cons
+
+    @property
+    def discovery_min_profit_factor_conservative(self) -> float:
+        return self.discovery_min_profit_factor_cons
+
+    @property
+    def discovery_min_avg_size_conservative(self) -> float:
+        return self.discovery_min_avg_size_cons
+
+    @property
+    def discovery_max_consecutive_losses_conservative(self) -> int:
+        return self.discovery_max_consec_losses_cons
+
+    @property
+    def discovery_min_wallet_age_days_conservative(self) -> int:
+        return self.discovery_min_wallet_age_cons
 
     @property
     def async_database_url(self) -> str:
