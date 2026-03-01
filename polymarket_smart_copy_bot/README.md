@@ -148,6 +148,7 @@ It includes:
 - runtime status (mode, exposure, PnL, tracked wallets)
 - recent copied trades and open positions
 - action buttons: `Start Trading` and `Stop Trading`
+- runtime switches (no redeploy): risk mode, boost, price filter, discovery auto-add
 
 If `DASHBOARD_WRITE_TOKEN` is set, control actions require this token in UI input (sent as `X-Dashboard-Token` header).
 

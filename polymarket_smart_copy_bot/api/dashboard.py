@@ -65,6 +65,16 @@ async def dashboard() -> HTMLResponse:
       <input id=\"token\" type=\"password\" placeholder=\"Dashboard write token (optional)\" />
       <span id=\"msg\" class=\"muted\"></span>
     </div>
+    <div class=\"controls\">
+      <button class=\"refresh\" onclick=\"setMode('aggressive')\">Mode: Aggressive</button>
+      <button class=\"refresh\" onclick=\"setMode('conservative')\">Mode: Conservative</button>
+      <button class=\"refresh\" onclick=\"setBoost(true)\">Boost ON</button>
+      <button class=\"refresh\" onclick=\"setBoost(false)\">Boost OFF</button>
+      <button class=\"refresh\" onclick=\"setPriceFilter(true)\">Price Filter ON</button>
+      <button class=\"refresh\" onclick=\"setPriceFilter(false)\">Price Filter OFF</button>
+      <button class=\"refresh\" onclick=\"setAutoAdd(true)\">AutoAdd ON</button>
+      <button class=\"refresh\" onclick=\"setAutoAdd(false)\">AutoAdd OFF</button>
+    </div>
 
     <div class=\"row\">
       <div class=\"card\"><div class=\"label\">Engine</div><div class=\"value\" id=\"engine\">-</div></div>
@@ -73,6 +83,9 @@ async def dashboard() -> HTMLResponse:
       <div class=\"card\"><div class=\"label\">Wallets Tracked</div><div class=\"value\" id=\"wallets\">-</div></div>
       <div class=\"card\"><div class=\"label\">Open Positions</div><div class=\"value\" id=\"openPos\">-</div></div>
       <div class=\"card\"><div class=\"label\">Exposure</div><div class=\"value\" id=\"exposure\">-</div></div>
+      <div class=\"card\"><div class=\"label\">Price Filter</div><div class=\"value\" id=\"priceFilter\">-</div></div>
+      <div class=\"card\"><div class=\"label\">Boost</div><div class=\"value\" id=\"boost\">-</div></div>
+      <div class=\"card\"><div class=\"label\">Discovery AutoAdd</div><div class=\"value\" id=\"autoAdd\">-</div></div>
       <div class=\"card\"><div class=\"label\">Daily PnL</div><div class=\"value\" id=\"dailyPnl\">-</div></div>
       <div class=\"card\"><div class=\"label\">Cumulative PnL</div><div class=\"value\" id=\"cumPnl\">-</div></div>
     </div>
@@ -122,6 +135,13 @@ function setMsg(text, isError=false) {{
   el.textContent = text || "";
   el.className = isError ? "bad" : "muted";
 }}
+function requireTokenIfNeeded() {{
+  if (TOKEN_REQUIRED && !localStorage.getItem('dashboard_write_token')) {{
+    setMsg('Write token is required for control actions.', true);
+    return false;
+  }}
+  return true;
+}}
 function authHeaders() {{
   const token = localStorage.getItem("dashboard_write_token") || "";
   const headers = {{"Content-Type": "application/json"}};
@@ -163,6 +183,15 @@ function renderStatus(s) {{
   document.getElementById('wallets').textContent = String(s.tracked_wallets ?? '-');
   document.getElementById('openPos').textContent = String(s.open_positions ?? '-');
   document.getElementById('exposure').textContent = money(s.exposure_usd || 0);
+  const pf = document.getElementById('priceFilter');
+  pf.textContent = s.price_filter_enabled ? 'ON' : 'OFF';
+  pf.className = `value ${{s.price_filter_enabled ? 'good' : 'warn'}}`;
+  const boost = document.getElementById('boost');
+  boost.textContent = s.high_conviction_boost_enabled ? 'ON' : 'OFF';
+  boost.className = `value ${{s.high_conviction_boost_enabled ? 'good' : 'warn'}}`;
+  const autoAdd = document.getElementById('autoAdd');
+  autoAdd.textContent = s.discovery_autoadd ? 'ON' : 'OFF';
+  autoAdd.className = `value ${{s.discovery_autoadd ? 'good' : 'warn'}}`;
 
   const daily = document.getElementById('dailyPnl');
   daily.textContent = money(s.daily_pnl_usd || 0);
@@ -222,24 +251,77 @@ async function setTrading(enabled) {{
       localStorage.setItem('dashboard_write_token', tokenInput);
     }}
 
-    if (TOKEN_REQUIRED && !localStorage.getItem('dashboard_write_token')) {{
-      setMsg('Write token is required for control actions.', true);
+    if (!requireTokenIfNeeded()) {{
       return;
     }}
 
-    const resp = await fetch('/control/trading', {{
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify({{enabled, run_now: enabled}}),
-    }});
-
-    if (!resp.ok) {{
-      const err = await resp.json().catch(() => ({{detail:'unknown_error'}}));
-      throw new Error(err.detail || `HTTP ${{resp.status}}`);
-    }}
-
-    const data = await resp.json();
+    const data = await postControl('/control/trading', {{enabled, run_now: enabled}});
     setMsg(`Trading: ${{data.trading_enabled ? 'ENABLED' : 'PAUSED'}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function postControl(path, payload) {{
+  const resp = await fetch(path, {{
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  }});
+  if (!resp.ok) {{
+    const err = await resp.json().catch(() => ({{detail:'unknown_error'}}));
+    throw new Error(err.detail || `HTTP ${{resp.status}}`);
+  }}
+  return await resp.json();
+}}
+
+async function setMode(mode) {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) localStorage.setItem('dashboard_write_token', tokenInput);
+    if (!requireTokenIfNeeded()) return;
+    const data = await postControl('/control/mode', {{mode}});
+    setMsg(`Risk mode: ${{String(data.risk_mode || mode).toUpperCase()}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function setBoost(enabled) {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) localStorage.setItem('dashboard_write_token', tokenInput);
+    if (!requireTokenIfNeeded()) return;
+    const data = await postControl('/control/boost', {{enabled}});
+    setMsg(`Boost: ${{data.high_conviction_boost_enabled ? 'ON' : 'OFF'}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function setPriceFilter(enabled) {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) localStorage.setItem('dashboard_write_token', tokenInput);
+    if (!requireTokenIfNeeded()) return;
+    const data = await postControl('/control/price-filter', {{enabled}});
+    setMsg(`Price filter: ${{data.price_filter_enabled ? 'ON' : 'OFF'}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function setAutoAdd(enabled) {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) localStorage.setItem('dashboard_write_token', tokenInput);
+    if (!requireTokenIfNeeded()) return;
+    const data = await postControl('/control/autoadd', {{enabled}});
+    setMsg(`AutoAdd: ${{data.discovery_autoadd ? 'ON' : 'OFF'}}`);
     await loadAll();
   }} catch (err) {{
     setMsg(`Action failed: ${{err.message || err}}`, true);
