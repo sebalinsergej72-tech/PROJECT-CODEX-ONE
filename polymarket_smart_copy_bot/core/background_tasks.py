@@ -517,6 +517,8 @@ class BackgroundOrchestrator:
         return int(value or 0)
 
     async def get_status(self) -> dict:
+        await self._refresh_portfolio_state_from_db()
+
         jobs = []
         for job in self.scheduler.get_jobs():
             jobs.append(
@@ -620,6 +622,7 @@ class BackgroundOrchestrator:
         }
 
     async def get_pnl_status(self) -> dict:
+        await self._refresh_portfolio_state_from_db()
         return {
             "total_equity_usd": self._last_portfolio_state.total_equity_usd,
             "exposure_usd": self._last_portfolio_state.exposure_usd,
@@ -627,6 +630,16 @@ class BackgroundOrchestrator:
             "daily_drawdown_pct": self._last_portfolio_state.daily_drawdown_pct,
             "cumulative_pnl_usd": self._last_portfolio_state.cumulative_pnl_usd,
         }
+
+    async def _refresh_portfolio_state_from_db(self) -> None:
+        """Keep status responses consistent with DB after restarts and new trades."""
+
+        state = await self._in_session(
+            "status_portfolio_state",
+            lambda session: self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode),
+        )
+        if state is not None:
+            self._last_portfolio_state = state
 
     async def run_trade_cycle_now(self) -> dict[str, Any]:
         if not self._trading_enabled:
