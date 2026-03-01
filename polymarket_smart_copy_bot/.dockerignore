@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.db
+*.log
+*.sqlite
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.git/
+.gitignore
+.env
+config/.env
+alembic/versions/__pycache__/
+tests/__pycache__/

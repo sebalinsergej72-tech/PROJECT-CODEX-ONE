@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+RiskMode = Literal["conservative", "aggressive"]
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=(BASE_DIR / "config" / ".env", BASE_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    app_name: str = "polymarket-smart-copy-bot"
+    app_env: str = Field(default="local", alias="APP_ENV")
+    debug: bool = Field(default=False, alias="DEBUG")
+    dry_run: bool = Field(default=True, alias="DRY_RUN")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    timezone: str = Field(default="UTC", alias="TIMEZONE")
+
+    port: int = Field(default=8000, alias="PORT")
+    database_url: str | None = Field(default=None, alias="DATABASE_URL")
+
+    polymarket_host: str = Field(default="https://clob.polymarket.com", alias="POLYMARKET_HOST")
+    polymarket_gamma_host: str = Field(
+        default="https://gamma-api.polymarket.com", alias="POLYMARKET_GAMMA_HOST"
+    )
+    polymarket_data_api_host: str = Field(
+        default="https://data-api.polymarket.com", alias="POLYMARKET_DATA_API_HOST"
+    )
+    polymarket_chain_id: int = Field(default=137, alias="POLYMARKET_CHAIN_ID")
+    polymarket_private_key: str | None = Field(default=None, alias="POLYMARKET_PRIVATE_KEY")
+    polymarket_proxy_address: str | None = Field(default=None, alias="POLYMARKET_PROXY_ADDRESS")
+    polymarket_api_key: str | None = Field(default=None, alias="POLYMARKET_API_KEY")
+    polymarket_verify_ssl: bool = Field(default=True, alias="POLYMARKET_VERIFY_SSL")
+
+    risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
+
+    # Legacy/conservative defaults
+    price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
+    price_max_cents: int = Field(default=80, alias="PRICE_MAX_CENTS")
+    max_risk_per_trade: float = Field(default=0.065, alias="MAX_RISK_PER_TRADE")
+    max_daily_risk: float = Field(default=0.07, alias="MAX_DAILY_RISK")
+    min_qualified_wallets: int = Field(default=5, alias="MIN_QUALIFIED_WALLETS")
+    max_qualified_wallets: int = Field(default=12, alias="MAX_QUALIFIED_WALLETS")
+
+    # Aggressive strategy knobs
+    max_wallets_aggressive: int = Field(default=6, alias="MAX_WALLETS_AGGRESSIVE")
+    min_wallets_aggressive: int = Field(default=3, alias="MIN_WALLETS_AGGRESSIVE")
+    max_per_wallet_pct: float = Field(default=0.15, alias="MAX_PER_WALLET_PCT")
+    max_per_position_pct: float = Field(default=0.10, alias="MAX_PER_POSITION_PCT")
+    max_total_exposure_pct: float = Field(default=0.65, alias="MAX_TOTAL_EXPOSURE_PCT")
+    kelly_multiplier: float = Field(default=2.0, alias="KELLY_MULTIPLIER")
+    drawdown_stop_pct: float = Field(default=0.25, alias="DRAWDOWN_STOP_PCT")
+    enable_short_term_markets: bool = Field(default=True, alias="ENABLE_SHORT_TERM_MARKETS")
+    disable_price_filter: bool = Field(default=True, alias="DISABLE_PRICE_FILTER")
+    auto_reinvest: bool = Field(default=True, alias="AUTO_REINVEST")
+    high_conviction_multiplier: float = Field(default=1.5, alias="HIGH_CONVICTION_MULTIPLIER")
+
+    wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")
+    discovery_autoadd_default: bool = Field(default=False, alias="DISCOVERY_AUTOADD")
+    trade_monitor_interval_seconds: int = Field(default=60, alias="TRADE_MONITOR_INTERVAL_SECONDS")
+    portfolio_refresh_seconds: int = Field(default=300, alias="PORTFOLIO_REFRESH_SECONDS")
+    capital_recalc_interval_minutes: int = Field(default=60, alias="CAPITAL_RECALC_INTERVAL_MINUTES")
+
+    manual_confirmation_usd: float = Field(default=250.0, alias="MANUAL_CONFIRMATION_USD")
+    default_starting_equity: float = Field(default=70.0, alias="DEFAULT_STARTING_EQUITY")
+
+    telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: int | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
+    dashboard_write_token: str | None = Field(default=None, alias="DASHBOARD_WRITE_TOKEN")
+    dashboard_refresh_seconds: int = Field(default=10, alias="DASHBOARD_REFRESH_SECONDS")
+
+    wallets_config_path: str = Field(default="config/wallets.yaml", alias="WALLETS_CONFIG_PATH")
+
+    @property
+    def resolved_wallets_config_path(self) -> Path:
+        return (BASE_DIR / self.wallets_config_path).resolve()
+
+    @property
+    def local_sqlite_path(self) -> Path:
+        return (BASE_DIR / "local.db").resolve()
+
+    @property
+    def conservative_max_per_wallet_pct(self) -> float:
+        return 0.07
+
+    @property
+    def conservative_max_per_position_pct(self) -> float:
+        return 0.04
+
+    @property
+    def conservative_max_total_exposure_pct(self) -> float:
+        return 0.35
+
+    @property
+    def async_database_url(self) -> str:
+        raw = self.database_url
+        if not raw:
+            return f"sqlite+aiosqlite:///{self.local_sqlite_path}"
+        if raw.startswith("postgres://"):
+            raw = raw.replace("postgres://", "postgresql://", 1)
+        if raw.startswith("postgresql://") and "+asyncpg" not in raw:
+            raw = raw.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if raw.startswith("postgresql+asyncpg://") and "sslmode=require" in raw:
+            raw = raw.replace("sslmode=require", "ssl=require")
+        if raw.startswith("sqlite:///") and "+aiosqlite" not in raw:
+            raw = raw.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+        return raw
+
+    @property
+    def sync_database_url(self) -> str:
+        raw = self.database_url
+        if not raw:
+            return f"sqlite:///{self.local_sqlite_path}"
+        if raw.startswith("postgres://"):
+            raw = raw.replace("postgres://", "postgresql://", 1)
+        if raw.startswith("postgresql+asyncpg://"):
+            return raw.replace("postgresql+asyncpg://", "postgresql://", 1)
+        if raw.startswith("sqlite+aiosqlite:///"):
+            return raw.replace("sqlite+aiosqlite:///", "sqlite:///", 1)
+        return raw
+
+    @property
+    def is_railway(self) -> bool:
+        return self.app_env.lower() in {"prod", "production"} or "railway" in self.app_env.lower()
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
