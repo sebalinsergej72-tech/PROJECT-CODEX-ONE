@@ -53,6 +53,7 @@ class PolymarketClient:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
         self._clob_client: Any = None
+        self._clob_creds_source: str | None = None
         self._dry_run = settings.dry_run
         self._missing_orderbooks: set[str] = set()
 
@@ -354,6 +355,13 @@ class PolymarketClient:
         except Exception as exc:
             text = str(exc)
             lower = text.lower()
+            if ("unauthorized" in lower or "invalid api key" in lower) and self._clob_client is not None:
+                try:
+                    payload = await asyncio.to_thread(self._diagnose_with_derived_retry_sync)
+                    return {"ok": True, "code": "ok_after_derived_retry", **payload}
+                except Exception as retry_exc:
+                    text = str(retry_exc)
+                    lower = text.lower()
             if "unauthorized" in lower or "invalid api key" in lower:
                 code = "invalid_api_credentials"
             elif "not enough balance / allowance" in lower:
@@ -372,6 +380,20 @@ class PolymarketClient:
             "code": "ok",
             "collateral_balance_usd": balance,
             "response_type": type(response).__name__,
+            "creds_source": self._clob_creds_source or "unknown",
+        }
+
+    def _diagnose_with_derived_retry_sync(self) -> dict[str, Any]:
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+        clob_client = self._ensure_clob_client()
+        self._switch_to_derived_creds(clob_client)
+        response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        balance = self._extract_collateral_balance(response)
+        return {
+            "collateral_balance_usd": balance,
+            "response_type": type(response).__name__,
+            "creds_source": self._clob_creds_source or "unknown",
         }
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
@@ -395,6 +417,11 @@ class PolymarketClient:
             return clob_client.post_order(signed_order, OrderType.GTC)
         except Exception as exc:
             text = str(exc).lower()
+            if "unauthorized" in text or "invalid api key" in text:
+                # Common operator error: Builder API creds provided instead of user L2 creds.
+                # Fall back to signer-derived user credentials and retry once.
+                self._switch_to_derived_creds(clob_client)
+                return clob_client.post_order(signed_order, OrderType.GTC)
             if "not enough balance / allowance" in text:
                 self._refresh_collateral_allowance_sync()
                 return clob_client.post_order(signed_order, OrderType.GTC)
@@ -443,11 +470,9 @@ class PolymarketClient:
                     api_passphrase=settings.polymarket_api_passphrase,
                 )
             )
+            self._clob_creds_source = "env"
         else:
-            creds = self._clob_client.create_or_derive_api_creds()
-            if creds is None:
-                raise RuntimeError("Failed to create or derive Polymarket API credentials")
-            self._clob_client.set_api_creds(creds)
+            self._switch_to_derived_creds(self._clob_client)
         return self._clob_client
 
     def _refresh_collateral_allowance_sync(self) -> None:
@@ -459,6 +484,13 @@ class PolymarketClient:
             clob_client.update_balance_allowance(params)
         except Exception as exc:
             logger.warning("Failed to refresh collateral allowance: {}", exc)
+
+    def _switch_to_derived_creds(self, clob_client: Any) -> None:
+        creds = clob_client.create_or_derive_api_creds()
+        if creds is None:
+            raise RuntimeError("Failed to create or derive Polymarket API credentials")
+        clob_client.set_api_creds(creds)
+        self._clob_creds_source = "derived"
 
     @staticmethod
     def _extract_collateral_balance(response: Any) -> float | None:
