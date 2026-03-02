@@ -221,7 +221,6 @@ class TradeMonitor:
             if price_cents <= 0:
                 continue
 
-            size_usd = max(local.quantity * (price_cents / 100), 0.01)
             external_trade_id = (
                 f"reconcile_close:{wallet.address.lower()}:{local.id}:{int(now.timestamp() // 300)}"
             )
@@ -241,7 +240,8 @@ class TradeMonitor:
                     outcome=local.outcome,
                     side=opposite_side,
                     source_price_cents=price_cents,
-                    source_size_usd=round(size_usd, 4),
+                    # 0 triggers full-close sizing in TradeExecutor._derive_close_size_usd
+                    source_size_usd=0.0,
                     is_short_term=False,
                 )
             )
