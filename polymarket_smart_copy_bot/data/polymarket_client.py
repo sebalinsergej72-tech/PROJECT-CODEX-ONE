@@ -509,11 +509,20 @@ class PolymarketClient:
     @staticmethod
     def _extract_collateral_balance(response: Any) -> float | None:
         if isinstance(response, (int, float)):
-            return float(response)
+            amount = float(response)
+            return PolymarketClient._normalize_collateral_units(amount=amount, raw=response, decimals_hint=None)
 
         if isinstance(response, dict):
+            decimals_hint = response.get("decimals") if isinstance(response.get("decimals"), int) else None
             for key in ("balance", "availableBalance", "usdcBalance", "available"):
                 value = response.get(key)
+                numeric = PolymarketClient._parse_numeric(value)
+                if numeric is not None:
+                    return PolymarketClient._normalize_collateral_units(
+                        amount=numeric,
+                        raw=value,
+                        decimals_hint=decimals_hint,
+                    )
                 parsed = PolymarketClient._extract_collateral_balance(value)
                 if parsed is not None:
                     return parsed
@@ -526,10 +535,10 @@ class PolymarketClient:
                     return parsed
 
         if isinstance(response, str):
-            try:
-                return float(response)
-            except ValueError:
+            parsed = PolymarketClient._parse_numeric(response)
+            if parsed is None:
                 return None
+            return PolymarketClient._normalize_collateral_units(amount=parsed, raw=response, decimals_hint=None)
 
         if isinstance(response, list):
             for item in response:
@@ -537,6 +546,36 @@ class PolymarketClient:
                 if parsed is not None:
                     return parsed
         return None
+
+    @staticmethod
+    def _parse_numeric(value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _normalize_collateral_units(amount: float, raw: Any, decimals_hint: int | None) -> float:
+        # CLOB balance endpoints often return USDC in base units (6 decimals).
+        if decimals_hint is not None and isinstance(raw, str) and raw.isdigit():
+            return amount / (10**decimals_hint)
+
+        if isinstance(raw, str):
+            raw_clean = raw.strip()
+            if raw_clean.isdigit():
+                return amount / 1_000_000
+
+        if isinstance(raw, int) and abs(raw) >= 1_000_000:
+            return amount / 1_000_000
+
+        if isinstance(raw, float) and raw.is_integer() and abs(raw) >= 1_000_000:
+            return amount / 1_000_000
+
+        return amount
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:
