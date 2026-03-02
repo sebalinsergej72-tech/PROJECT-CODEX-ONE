@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode, settings
 from core.risk_manager import PortfolioState
-from data.polymarket_client import PolymarketClient
+from data.polymarket_client import PolymarketClient, WalletOpenPosition
 from models.models import BotRuntimeState, PortfolioSnapshot, Position, TradeSide
 
 
@@ -17,6 +17,7 @@ class PortfolioTracker:
 
     CAPITAL_BASE_KEY = "capital_base_usd"
     INITIAL_CAPITAL_KEY = "initial_capital_usd"
+    ACCOUNT_SYNC_WALLET = "account_sync"
 
     def __init__(self, polymarket_client: PolymarketClient) -> None:
         self.polymarket_client = polymarket_client
@@ -36,6 +37,70 @@ class PortfolioTracker:
 
         logger.info("Recovered {} open positions from DB", count)
         return count
+
+    async def sync_account_open_positions(self, session: AsyncSession) -> tuple[int, int]:
+        """Sync account open positions from Polymarket into DB.
+
+        Returns:
+            tuple[synced_new, closed_stale]
+        """
+
+        if self.polymarket_client.is_dry_run():
+            return (0, 0)
+
+        remote = await self.polymarket_client.fetch_account_open_positions(limit=200)
+        if remote is None:
+            return (0, 0)
+
+        remote_by_key = {self._position_key(row.market_id, row.token_id, row.outcome): row for row in remote}
+
+        local_rows = (
+            await session.execute(
+                select(Position).where(
+                    Position.is_open.is_(True),
+                )
+            )
+        ).scalars().all()
+        local_by_key: dict[str, Position] = {}
+        for row in local_rows:
+            key = self._position_key(row.market_id, row.token_id, row.outcome)
+            local_by_key.setdefault(key, row)
+
+        now = datetime.now(tz=timezone.utc)
+        synced_new = 0
+        for key, remote_pos in remote_by_key.items():
+            if key in local_by_key:
+                continue
+            session.add(self._build_account_sync_position(remote_pos, now=now))
+            synced_new += 1
+
+        stale_account_rows = (
+            await session.execute(
+                select(Position).where(
+                    Position.is_open.is_(True),
+                    Position.wallet_address == self.ACCOUNT_SYNC_WALLET,
+                )
+            )
+        ).scalars().all()
+        closed_stale = 0
+        for row in stale_account_rows:
+            key = self._position_key(row.market_id, row.token_id, row.outcome)
+            if key in remote_by_key:
+                continue
+            row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
+            row.unrealized_pnl_usd = 0.0
+            row.is_open = False
+            row.closed_at = now
+            row.updated_at = now
+            closed_stale += 1
+
+        if synced_new or closed_stale:
+            logger.info(
+                "Account position sync applied: new_open={} closed_stale={}",
+                synced_new,
+                closed_stale,
+            )
+        return (synced_new, closed_stale)
 
     async def mark_to_market(self, session: AsyncSession) -> None:
         query = select(Position).where(Position.is_open.is_(True))
@@ -200,3 +265,27 @@ class PortfolioTracker:
             return
         row.value = str(value)
         row.updated_at = now
+
+    @classmethod
+    def _position_key(cls, market_id: str, token_id: str | None, outcome: str) -> str:
+        token = (token_id or "").strip().lower()
+        return f"{market_id.strip().lower()}|{token}|{outcome.strip().lower()}"
+
+    @classmethod
+    def _build_account_sync_position(cls, row: WalletOpenPosition, *, now: datetime) -> Position:
+        side = TradeSide.BUY.value
+        return Position(
+            wallet_address=cls.ACCOUNT_SYNC_WALLET,
+            market_id=row.market_id,
+            token_id=row.token_id,
+            outcome=row.outcome,
+            side=side,
+            quantity=max(float(row.quantity), 0.0),
+            avg_price_cents=max(float(row.avg_price_cents), 0.0),
+            invested_usd=max(float(row.invested_usd), 0.0),
+            current_price_cents=max(float(row.current_price_cents), 0.0),
+            unrealized_pnl_usd=float(row.unrealized_pnl_usd),
+            is_open=True,
+            opened_at=now,
+            updated_at=now,
+        )

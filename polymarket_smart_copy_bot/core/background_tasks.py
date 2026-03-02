@@ -350,6 +350,7 @@ class BackgroundOrchestrator:
         self.last_trade_scan_at = datetime.now(tz=timezone.utc)
 
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
+        await self.portfolio_tracker.sync_account_open_positions(session)
         await self.portfolio_tracker.mark_to_market(session)
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
         self.last_portfolio_refresh_at = datetime.now(tz=timezone.utc)
@@ -369,6 +370,7 @@ class BackgroundOrchestrator:
 
     async def _restore_open_positions(self, session: AsyncSession) -> None:
         await self.portfolio_tracker.restore_open_positions(session)
+        await self.portfolio_tracker.sync_account_open_positions(session)
 
     async def _load_runtime_state(self, session: AsyncSession) -> None:
         mode_raw = await self._get_runtime_text(session, self.RUNTIME_KEY_MODE)

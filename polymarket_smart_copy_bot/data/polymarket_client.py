@@ -30,6 +30,20 @@ class WalletTradeSignal:
 
 
 @dataclass(slots=True)
+class WalletOpenPosition:
+    wallet_address: str
+    market_id: str
+    token_id: str | None
+    outcome: str
+    quantity: float
+    avg_price_cents: float
+    current_price_cents: float
+    invested_usd: float
+    current_value_usd: float
+    unrealized_pnl_usd: float
+
+
+@dataclass(slots=True)
 class OrderRequest:
     token_id: str
     side: str
@@ -237,6 +251,56 @@ class PolymarketClient:
 
         signals.sort(key=lambda x: x.traded_at, reverse=True)
         return signals
+
+    async def fetch_wallet_open_positions(
+        self,
+        wallet_address: str,
+        *,
+        limit: int = 200,
+        size_threshold: float = 0.1,
+    ) -> list[WalletOpenPosition] | None:
+        """Fetch wallet open positions from data-api.
+
+        Returns:
+            list[WalletOpenPosition]: Successful fetch (can be empty).
+            None: Upstream/API failure, caller should avoid reconciliation decisions.
+        """
+
+        normalized_wallet = self._normalize_address(wallet_address)
+        if normalized_wallet is None:
+            return []
+
+        url = f"{settings.polymarket_data_api_host.rstrip('/')}/positions"
+        params = {
+            "user": normalized_wallet,
+            "sizeThreshold": str(size_threshold),
+            "limit": max(1, min(limit, 500)),
+            "offset": 0,
+        }
+        try:
+            raw = await self._request_json("GET", url, params=params)
+        except Exception as exc:
+            logger.warning("Failed to fetch open positions for {}: {}", normalized_wallet, exc)
+            return None
+
+        rows = self._coerce_rows(raw)
+        positions: list[WalletOpenPosition] = []
+        for row in rows:
+            parsed = self._parse_open_position_row(row, default_wallet=normalized_wallet)
+            if parsed is None:
+                continue
+            if parsed.quantity <= 0:
+                continue
+            positions.append(parsed)
+        return positions
+
+    async def fetch_account_open_positions(self, *, limit: int = 200) -> list[WalletOpenPosition] | None:
+        """Fetch open positions for the bot account (proxy/signer funder address)."""
+
+        target = self._resolve_account_address()
+        if target is None:
+            return None
+        return await self.fetch_wallet_open_positions(target, limit=limit)
 
     async def fetch_market_mid_price(self, market_id: str, token_id: str | None = None) -> float | None:
         """Fetch current market price in cents for mark-to-market and risk controls."""
@@ -663,11 +727,51 @@ class PolymarketClient:
         return None
 
     @staticmethod
+    def _parse_open_position_row(row: dict[str, Any], *, default_wallet: str) -> WalletOpenPosition | None:
+        market_id = str(row.get("conditionId") or row.get("market") or row.get("marketId") or "")
+        if not market_id:
+            return None
+
+        token_id = row.get("asset") or row.get("tokenId") or row.get("tokenID")
+        outcome = str(row.get("outcome") or row.get("title") or "UNKNOWN")
+
+        quantity = PolymarketClient._parse_numeric(row.get("size")) or 0.0
+        avg_price = PolymarketClient._parse_numeric(row.get("avgPrice")) or 0.0
+        cur_price = PolymarketClient._parse_numeric(row.get("curPrice")) or 0.0
+        invested = PolymarketClient._parse_numeric(row.get("initialValue"))
+        current_value = PolymarketClient._parse_numeric(row.get("currentValue"))
+        unrealized = PolymarketClient._parse_numeric(row.get("cashPnl"))
+
+        avg_price_cents = ensure_price_in_cents(avg_price) if avg_price > 0 else 0.0
+        current_price_cents = ensure_price_in_cents(cur_price) if cur_price > 0 else avg_price_cents
+
+        if invested is None:
+            invested = quantity * max(avg_price, 0.0)
+        if current_value is None:
+            current_value = quantity * max(cur_price, 0.0)
+        if unrealized is None:
+            unrealized = current_value - invested
+
+        wallet = PolymarketClient._extract_wallet_from_row(row) or default_wallet
+        return WalletOpenPosition(
+            wallet_address=wallet,
+            market_id=market_id,
+            token_id=str(token_id) if token_id is not None else None,
+            outcome=outcome,
+            quantity=abs(quantity),
+            avg_price_cents=avg_price_cents,
+            current_price_cents=current_price_cents,
+            invested_usd=max(float(invested), 0.0),
+            current_value_usd=max(float(current_value), 0.0),
+            unrealized_pnl_usd=float(unrealized),
+        )
+
+    @staticmethod
     def _coerce_rows(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):
             return [row for row in payload if isinstance(row, dict)]
         if isinstance(payload, dict):
-            for key in ("data", "items", "rows", "results"):
+            for key in ("data", "items", "rows", "results", "positions"):
                 value = payload.get(key)
                 if isinstance(value, list):
                     return [row for row in value if isinstance(row, dict)]
@@ -715,3 +819,14 @@ class PolymarketClient:
             # Some endpoints omit wallet fields but still honor the query wallet.
             return rows
         return filtered
+
+    def _resolve_account_address(self) -> str | None:
+        proxy = self._normalize_address(settings.polymarket_proxy_address)
+        if proxy:
+            return proxy
+        if self._clob_client is not None and getattr(self._clob_client, "signer", None):
+            try:
+                return self._normalize_address(self._clob_client.signer.address())
+            except Exception:
+                return None
+        return None
