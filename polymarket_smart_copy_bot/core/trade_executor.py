@@ -112,6 +112,9 @@ class TradeExecutor:
                 copied_trade.reason = "manual_rejection_or_timeout"
                 return
 
+        # Persist the bot-calculated intended size even if execution later fails.
+        copied_trade.size_usd = decision.target_size_usd
+
         result = await self.polymarket_client.place_order(
             OrderRequest(
                 token_id=intent.token_id or "",
@@ -152,7 +155,6 @@ class TradeExecutor:
         copied_trade.reason = (
             f"executed mode={risk_mode} mult={decision.wallet_multiplier:.2f} kelly={decision.kelly_fraction:.3f}"
         )
-        copied_trade.size_usd = decision.target_size_usd
 
         await self._upsert_position(session, intent, decision.target_size_usd)
         await self.notifications.send_message(
