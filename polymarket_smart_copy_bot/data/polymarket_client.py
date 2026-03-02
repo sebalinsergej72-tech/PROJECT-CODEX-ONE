@@ -341,21 +341,10 @@ class PolymarketClient:
             return OrderResult(success=False, order_id=None, tx_hash=None, error=str(exc))
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
-        from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import OrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
 
-        if self._clob_client is None:
-            self._clob_client = ClobClient(
-                settings.polymarket_host,
-                key=settings.polymarket_private_key,
-                chain_id=settings.polymarket_chain_id,
-            )
-            if settings.polymarket_api_key:
-                self._clob_client.set_api_creds({"api_key": settings.polymarket_api_key})
-            else:
-                creds = self._clob_client.create_or_derive_api_creds()
-                self._clob_client.set_api_creds(creds)
+        clob_client = self._ensure_clob_client()
 
         side = BUY if request.side.lower() == "buy" else SELL
         price_decimal = max(min(request.price_cents / 100, 0.999), 0.001)
@@ -367,30 +356,106 @@ class PolymarketClient:
             size=size,
             side=side,
         )
-        signed_order = self._clob_client.create_order(order_args)
-        return self._clob_client.post_order(signed_order, OrderType.GTC)
+        signed_order = clob_client.create_order(order_args)
+        try:
+            return clob_client.post_order(signed_order, OrderType.GTC)
+        except Exception as exc:
+            text = str(exc).lower()
+            if "not enough balance / allowance" in text:
+                self._refresh_collateral_allowance_sync()
+                return clob_client.post_order(signed_order, OrderType.GTC)
+            raise
 
     def _fetch_account_balance_sync(self) -> float | None:
-        from py_clob_client.client import ClobClient
-
-        if self._clob_client is None:
-            self._clob_client = ClobClient(
-                settings.polymarket_host,
-                key=settings.polymarket_private_key,
-                chain_id=settings.polymarket_chain_id,
-            )
-            if settings.polymarket_api_key:
-                self._clob_client.set_api_creds({"api_key": settings.polymarket_api_key})
-            else:
-                creds = self._clob_client.create_or_derive_api_creds()
-                self._clob_client.set_api_creds(creds)
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
 
         # `get_balance_allowance` response schema can vary between API versions.
-        response = self._clob_client.get_balance_allowance()
+        clob_client = self._ensure_clob_client()
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        response = clob_client.get_balance_allowance(params)
+        balance = self._extract_collateral_balance(response)
+        if balance is not None:
+            return balance
+        return None
+
+    def _ensure_clob_client(self) -> Any:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+        from py_order_utils.model import EOA, POLY_PROXY
+
+        if self._clob_client is not None:
+            return self._clob_client
+
+        signature_type = settings.polymarket_signature_type
+        if signature_type is None:
+            signature_type = POLY_PROXY if settings.polymarket_proxy_address else EOA
+
+        self._clob_client = ClobClient(
+            settings.polymarket_host,
+            key=settings.polymarket_private_key,
+            chain_id=settings.polymarket_chain_id,
+            signature_type=signature_type,
+            funder=settings.polymarket_proxy_address or None,
+        )
+        if (
+            settings.polymarket_api_key
+            and settings.polymarket_api_secret
+            and settings.polymarket_api_passphrase
+        ):
+            self._clob_client.set_api_creds(
+                ApiCreds(
+                    api_key=settings.polymarket_api_key,
+                    api_secret=settings.polymarket_api_secret,
+                    api_passphrase=settings.polymarket_api_passphrase,
+                )
+            )
+        else:
+            creds = self._clob_client.create_or_derive_api_creds()
+            if creds is None:
+                raise RuntimeError("Failed to create or derive Polymarket API credentials")
+            self._clob_client.set_api_creds(creds)
+        return self._clob_client
+
+    def _refresh_collateral_allowance_sync(self) -> None:
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+        try:
+            clob_client = self._ensure_clob_client()
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            clob_client.update_balance_allowance(params)
+        except Exception as exc:
+            logger.warning("Failed to refresh collateral allowance: {}", exc)
+
+    @staticmethod
+    def _extract_collateral_balance(response: Any) -> float | None:
+        if isinstance(response, (int, float)):
+            return float(response)
+
         if isinstance(response, dict):
-            for key in ("balance", "availableBalance", "usdcBalance"):
-                if key in response and response[key] is not None:
-                    return float(response[key])
+            for key in ("balance", "availableBalance", "usdcBalance", "available"):
+                value = response.get(key)
+                parsed = PolymarketClient._extract_collateral_balance(value)
+                if parsed is not None:
+                    return parsed
+            for key in ("data", "result", "collateral", "balances", "allowance"):
+                value = response.get(key)
+                if value is None:
+                    continue
+                parsed = PolymarketClient._extract_collateral_balance(value)
+                if parsed is not None:
+                    return parsed
+
+        if isinstance(response, str):
+            try:
+                return float(response)
+            except ValueError:
+                return None
+
+        if isinstance(response, list):
+            for item in response:
+                parsed = PolymarketClient._extract_collateral_balance(item)
+                if parsed is not None:
+                    return parsed
         return None
 
     @staticmethod

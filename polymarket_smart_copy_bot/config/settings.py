@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     polymarket_private_key: str | None = Field(default=None, alias="POLYMARKET_PRIVATE_KEY")
     polymarket_proxy_address: str | None = Field(default=None, alias="POLYMARKET_PROXY_ADDRESS")
     polymarket_api_key: str | None = Field(default=None, alias="POLYMARKET_API_KEY")
+    polymarket_api_secret: str | None = Field(default=None, alias="POLYMARKET_API_SECRET")
+    polymarket_api_passphrase: str | None = Field(default=None, alias="POLYMARKET_API_PASSPHRASE")
+    polymarket_signature_type: int | None = Field(default=None, alias="POLYMARKET_SIGNATURE_TYPE")
     polymarket_verify_ssl: bool = Field(default=True, alias="POLYMARKET_VERIFY_SSL")
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
