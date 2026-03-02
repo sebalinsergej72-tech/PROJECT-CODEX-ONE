@@ -166,3 +166,14 @@ async def control_polymarket_check(
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.check_polymarket_credentials()
     return {"status": "ok", **result}
+
+
+@router.post("/control/capital/recalc")
+async def control_capital_recalc(
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.run_capital_recalc_now()
+    return {"status": "ok", **result}

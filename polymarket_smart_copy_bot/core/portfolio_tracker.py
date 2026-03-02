@@ -69,9 +69,10 @@ class PortfolioTracker:
 
         api_balance = await self.polymarket_client.fetch_account_balance_usd()
         if api_balance is not None and api_balance > 0:
+            # Live API balance is authoritative and should override stale runtime values.
             current_base = api_balance
-
-        if settings.auto_reinvest and risk_mode == "aggressive":
+        elif settings.auto_reinvest and risk_mode == "aggressive":
+            # Only fallback to state-based reinvest when API balance is unavailable.
             state = await self.calculate_state(session, risk_mode=risk_mode)
             current_base = max(current_base, state.total_equity_usd)
 

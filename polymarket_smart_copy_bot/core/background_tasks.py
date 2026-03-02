@@ -692,6 +692,15 @@ class BackgroundOrchestrator:
         await self._run_trade_monitor_job()
         return {"ok": True, "last_trade_scan_at": self._iso(self.last_trade_scan_at)}
 
+    async def run_capital_recalc_now(self) -> dict[str, Any]:
+        await self._run_capital_recalc_job()
+        await self._refresh_portfolio_state_from_db()
+        return {
+            "ok": True,
+            "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
+            "total_equity_usd": self._last_portfolio_state.total_equity_usd,
+        }
+
     async def get_recent_trades(self, limit: int = 20) -> list[dict[str, Any]]:
         clamped_limit = max(1, min(limit, 200))
         rows = await self._in_session(
