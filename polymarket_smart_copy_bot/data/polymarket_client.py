@@ -300,7 +300,7 @@ class PolymarketClient:
         target = self._resolve_account_address()
         if target is None:
             return None
-        return await self.fetch_wallet_open_positions(target, limit=limit)
+        return await self.fetch_wallet_open_positions(target, limit=limit, size_threshold=0.0)
 
     async def fetch_market_mid_price(self, market_id: str, token_id: str | None = None) -> float | None:
         """Fetch current market price in cents for mark-to-market and risk controls."""

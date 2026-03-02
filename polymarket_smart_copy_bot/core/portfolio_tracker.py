@@ -53,6 +53,10 @@ class PortfolioTracker:
             return (0, 0)
 
         remote_by_key = {self._position_key(row.market_id, row.token_id, row.outcome): row for row in remote}
+        remote_market_token = {
+            self._market_token_key(row.market_id, row.token_id)
+            for row in remote
+        }
 
         local_rows = (
             await session.execute(
@@ -94,13 +98,34 @@ class PortfolioTracker:
             row.updated_at = now
             closed_stale += 1
 
-        if synced_new or closed_stale:
+        orphan_closed = 0
+        copied_open_rows = (
+            await session.execute(
+                select(Position).where(
+                    Position.is_open.is_(True),
+                    Position.wallet_address != self.ACCOUNT_SYNC_WALLET,
+                )
+            )
+        ).scalars().all()
+        for row in copied_open_rows:
+            mt_key = self._market_token_key(row.market_id, row.token_id)
+            if mt_key in remote_market_token:
+                continue
+            row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
+            row.unrealized_pnl_usd = 0.0
+            row.is_open = False
+            row.closed_at = now
+            row.updated_at = now
+            orphan_closed += 1
+
+        if synced_new or closed_stale or orphan_closed:
             logger.info(
-                "Account position sync applied: new_open={} closed_stale={}",
+                "Account position sync applied: new_open={} closed_stale={} orphan_closed={}",
                 synced_new,
                 closed_stale,
+                orphan_closed,
             )
-        return (synced_new, closed_stale)
+        return (synced_new, closed_stale + orphan_closed)
 
     async def mark_to_market(self, session: AsyncSession) -> None:
         query = select(Position).where(Position.is_open.is_(True))
@@ -270,6 +295,11 @@ class PortfolioTracker:
     def _position_key(cls, market_id: str, token_id: str | None, outcome: str) -> str:
         token = (token_id or "").strip().lower()
         return f"{market_id.strip().lower()}|{token}|{outcome.strip().lower()}"
+
+    @classmethod
+    def _market_token_key(cls, market_id: str, token_id: str | None) -> str:
+        token = (token_id or "").strip().lower()
+        return f"{market_id.strip().lower()}|{token}"
 
     @classmethod
     def _build_account_sync_position(cls, row: WalletOpenPosition, *, now: datetime) -> Position:
