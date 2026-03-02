@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode, settings
@@ -78,6 +78,15 @@ class PortfolioTracker:
 
         await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, current_base)
         return current_base
+
+    async def reset_pnl_baseline(self, session: AsyncSession, baseline_usd: float) -> None:
+        """Reset capital and PnL baseline (used when switching engine modes)."""
+
+        baseline = max(float(baseline_usd), 0.0)
+        await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, baseline)
+        await self._set_runtime_float(session, self.INITIAL_CAPITAL_KEY, baseline)
+        # Prevent stale 24h reference snapshots from previous mode from skewing daily PnL.
+        await session.execute(delete(PortfolioSnapshot))
 
     async def calculate_state(self, session: AsyncSession, risk_mode: RiskMode) -> PortfolioState:
         positions_query = select(Position).where(Position.is_open.is_(True))

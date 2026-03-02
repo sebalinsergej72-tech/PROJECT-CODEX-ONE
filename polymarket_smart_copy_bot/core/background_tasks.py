@@ -464,6 +464,17 @@ class BackgroundOrchestrator:
                     self._live_started_at.isoformat(),
                 ),
             )
+            live_balance = await self.polymarket_client.fetch_account_balance_usd()
+            baseline = (
+                float(live_balance)
+                if live_balance is not None and live_balance > 0
+                else max(self._last_portfolio_state.total_equity_usd, settings.default_starting_equity)
+            )
+            await self._in_session(
+                "reset_live_pnl_baseline",
+                lambda session: self.portfolio_tracker.reset_pnl_baseline(session, baseline),
+            )
+            logger.info("Live PnL baseline reset to ${:.4f}", baseline)
         engine = "PAPER (DRY RUN)" if enabled else "LIVE"
         await self.notifications.send_message(f"Engine mode switched to {engine} from dashboard/API.")
         return await self.get_status()
