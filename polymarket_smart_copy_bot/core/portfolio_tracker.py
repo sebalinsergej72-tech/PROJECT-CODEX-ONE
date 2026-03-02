@@ -95,10 +95,21 @@ class PortfolioTracker:
         if initial_capital is None:
             initial_capital = settings.default_starting_equity
 
-        current_delta = realized + unrealized
-        total_equity = capital_base + current_delta
+        # In DRY_RUN, `capital_base` behaves like full account equity baseline.
+        # In LIVE mode, `capital_base` comes from CLOB collateral balance (cash component),
+        # so total equity must include marked value of open positions as well.
+        if self.polymarket_client.is_dry_run():
+            current_delta = realized + unrealized
+            total_equity = capital_base + current_delta
+            available_cash = max(total_equity - exposure, 0.0)
+        else:
+            # Mark-to-market equity = cash collateral + current position value.
+            # Current position value = invested_cost + unrealized_pnl.
+            total_equity = capital_base + exposure + unrealized
+            # Realized PnL is already reflected in collateral balance in live mode.
+            available_cash = max(capital_base, 0.0)
+
         cumulative_pnl = total_equity - initial_capital
-        available_cash = max(total_equity - exposure, 0.0)
 
         daily_pnl, daily_drawdown_pct = await self._compute_daily_drawdown(session, total_equity)
 
