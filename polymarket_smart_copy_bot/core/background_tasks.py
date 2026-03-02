@@ -468,6 +468,9 @@ class BackgroundOrchestrator:
         await self.notifications.send_message(f"Engine mode switched to {engine} from dashboard/API.")
         return await self.get_status()
 
+    async def check_polymarket_credentials(self) -> dict[str, Any]:
+        return await self.polymarket_client.diagnose_live_credentials()
+
     async def get_discovery_status(self) -> dict[str, Any]:
         top = await self.get_top_wallets(limit=10)
         result = self.wallet_discovery.last_result

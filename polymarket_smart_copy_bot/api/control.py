@@ -155,3 +155,14 @@ async def control_engine(
         "dry_run": status.get("dry_run", payload.dry_run),
         "engine": "paper" if status.get("dry_run", payload.dry_run) else "live",
     }
+
+
+@router.post("/control/polymarket/check")
+async def control_polymarket_check(
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.check_polymarket_credentials()
+    return {"status": "ok", **result}

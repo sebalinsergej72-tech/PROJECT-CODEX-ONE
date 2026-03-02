@@ -340,6 +340,40 @@ class PolymarketClient:
             logger.exception("Order placement failed")
             return OrderResult(success=False, order_id=None, tx_hash=None, error=str(exc))
 
+    async def diagnose_live_credentials(self) -> dict[str, Any]:
+        """Validate live CLOB auth path using current runtime credentials."""
+
+        if self._dry_run:
+            return {"ok": False, "code": "engine_is_dry_run"}
+        if not settings.polymarket_private_key:
+            return {"ok": False, "code": "missing_private_key"}
+
+        try:
+            payload = await asyncio.to_thread(self._diagnose_live_credentials_sync)
+            return {"ok": True, **payload}
+        except Exception as exc:
+            text = str(exc)
+            lower = text.lower()
+            if "unauthorized" in lower or "invalid api key" in lower:
+                code = "invalid_api_credentials"
+            elif "not enough balance / allowance" in lower:
+                code = "insufficient_balance_allowance"
+            else:
+                code = "diagnostic_failed"
+            return {"ok": False, "code": code, "error": text}
+
+    def _diagnose_live_credentials_sync(self) -> dict[str, Any]:
+        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+        clob_client = self._ensure_clob_client()
+        response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        balance = self._extract_collateral_balance(response)
+        return {
+            "code": "ok",
+            "collateral_balance_usd": balance,
+            "response_type": type(response).__name__,
+        }
+
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
         from py_clob_client.clob_types import OrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
