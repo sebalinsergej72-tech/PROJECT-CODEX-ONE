@@ -376,11 +376,18 @@ class PolymarketClient:
         clob_client = self._ensure_clob_client()
         response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         balance = self._extract_collateral_balance(response)
+        signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
+        builder = getattr(clob_client, "builder", None)
+        funder_address = getattr(builder, "funder", None) if builder is not None else None
+        signature_type = getattr(builder, "sig_type", None) if builder is not None else None
         return {
             "code": "ok",
             "collateral_balance_usd": balance,
             "response_type": type(response).__name__,
             "creds_source": self._clob_creds_source or "unknown",
+            "signer_address": signer_address,
+            "funder_address": funder_address,
+            "signature_type": signature_type,
         }
 
     def _diagnose_with_derived_retry_sync(self) -> dict[str, Any]:
@@ -390,10 +397,17 @@ class PolymarketClient:
         self._switch_to_derived_creds(clob_client)
         response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         balance = self._extract_collateral_balance(response)
+        signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
+        builder = getattr(clob_client, "builder", None)
+        funder_address = getattr(builder, "funder", None) if builder is not None else None
+        signature_type = getattr(builder, "sig_type", None) if builder is not None else None
         return {
             "collateral_balance_usd": balance,
             "response_type": type(response).__name__,
             "creds_source": self._clob_creds_source or "unknown",
+            "signer_address": signer_address,
+            "funder_address": funder_address,
+            "signature_type": signature_type,
         }
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
