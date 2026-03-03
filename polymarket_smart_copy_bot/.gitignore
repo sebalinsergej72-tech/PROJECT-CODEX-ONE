@@ -11,3 +11,5 @@ config/.env
 config/.env*
 !.env.example
 !config/.env.example
+node_modules/
+dist/

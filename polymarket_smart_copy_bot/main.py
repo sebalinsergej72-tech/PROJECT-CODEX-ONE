@@ -5,10 +5,12 @@ import signal
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import typer
 import uvicorn
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from rich.console import Console
 from rich.traceback import install as rich_traceback_install
@@ -83,6 +85,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+dashboard_dist = Path(__file__).resolve().parent / "dist"
+if dashboard_dist.exists():
+    app.mount(
+        "/dashboard-static",
+        StaticFiles(directory=str(dashboard_dist), html=False),
+        name="dashboard-static",
+    )
+
 app.include_router(health_router)
 app.include_router(status_router)
 app.include_router(trades_router)

@@ -1,0 +1,136 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 6%;
+    --foreground: 220 30% 92%;
+    --card: 222 40% 10%;
+    --card-foreground: 220 30% 92%;
+    --popover: 222 40% 10%;
+    --popover-foreground: 220 30% 92%;
+    --primary: 217 90% 61%;
+    --primary-foreground: 222 47% 6%;
+    --secondary: 222 30% 16%;
+    --secondary-foreground: 220 30% 85%;
+    --muted: 222 25% 18%;
+    --muted-foreground: 220 15% 55%;
+    --accent: 217 90% 61%;
+    --accent-foreground: 222 47% 6%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 30% 20%;
+    --input: 222 30% 18%;
+    --ring: 217 90% 61%;
+    --radius: 0.75rem;
+    --profit: 152 69% 45%;
+    --loss: 0 72% 56%;
+    --warning: 38 92% 60%;
+    --info: 217 90% 61%;
+    --card-gradient: linear-gradient(180deg, hsl(222 40% 12%), hsl(222 40% 8%));
+    --card-border: hsl(222 30% 22%);
+    --card-glow: 0 0 30px -10px;
+    --surface-1: 222 35% 12%;
+    --surface-2: 222 35% 15%;
+    --sidebar-background: 222 47% 6%;
+    --sidebar-foreground: 220 30% 85%;
+    --sidebar-primary: 217 90% 61%;
+    --sidebar-primary-foreground: 222 47% 6%;
+    --sidebar-accent: 222 30% 16%;
+    --sidebar-accent-foreground: 220 30% 85%;
+    --sidebar-border: 222 30% 20%;
+    --sidebar-ring: 217 90% 61%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+}
+
+@layer components {
+  .trading-card {
+    background: var(--card-gradient);
+    border: 1px solid var(--card-border);
+    @apply rounded-xl p-4 transition-all duration-300;
+  }
+
+  .trading-card:hover {
+    border-color: hsl(var(--primary) / 0.4);
+    box-shadow: var(--card-glow) hsl(var(--primary) / 0.15);
+  }
+
+  .status-good {
+    @apply text-profit;
+    text-shadow: 0 0 12px hsl(var(--profit) / 0.5);
+  }
+
+  .status-bad {
+    @apply text-loss;
+    text-shadow: 0 0 12px hsl(var(--loss) / 0.5);
+  }
+
+  .status-warn {
+    @apply text-warning;
+    text-shadow: 0 0 12px hsl(var(--warning) / 0.5);
+  }
+
+  .glow-border-good {
+    border-color: hsl(var(--profit) / 0.5);
+    box-shadow: inset 0 0 0 1px hsl(var(--profit) / 0.2), 0 0 20px -8px hsl(var(--profit) / 0.3);
+  }
+
+  .glow-border-bad {
+    border-color: hsl(var(--loss) / 0.5);
+    box-shadow: inset 0 0 0 1px hsl(var(--loss) / 0.2), 0 0 20px -8px hsl(var(--loss) / 0.3);
+  }
+
+  .glow-border-warn {
+    border-color: hsl(var(--warning) / 0.5);
+    box-shadow: inset 0 0 0 1px hsl(var(--warning) / 0.2), 0 0 20px -8px hsl(var(--warning) / 0.3);
+  }
+
+  .pulse-dot {
+    @apply inline-block h-2 w-2 rounded-full;
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  .pulse-dot-good {
+    @apply bg-profit;
+    box-shadow: 0 0 6px hsl(var(--profit) / 0.6);
+  }
+
+  .pulse-dot-bad {
+    @apply bg-loss;
+    box-shadow: 0 0 6px hsl(var(--loss) / 0.6);
+  }
+
+  .pulse-dot-warn {
+    @apply bg-warning;
+    box-shadow: 0 0 6px hsl(var(--warning) / 0.6);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}

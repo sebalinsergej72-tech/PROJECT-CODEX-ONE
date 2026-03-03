@@ -1,3 +1,20 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+COPY package.json ./
+COPY package-lock.json ./
+RUN npm ci
+
+COPY index.html ./
+COPY postcss.config.js ./
+COPY tailwind.config.ts ./
+COPY tsconfig.json ./
+COPY vite.config.ts ./
+COPY src ./src
+
+RUN npm run build
+
 FROM python:3.11-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -34,6 +51,7 @@ RUN pip install --upgrade pip \
     && rm -rf /wheels
 
 COPY . .
+COPY --from=frontend-builder /frontend/dist /app/dist
 RUN chown -R botuser:botuser /app
 
 USER botuser
