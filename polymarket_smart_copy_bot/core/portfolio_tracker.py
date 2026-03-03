@@ -73,7 +73,12 @@ class PortfolioTracker:
         now = datetime.now(tz=timezone.utc)
         synced_new = 0
         dedup_closed = 0
+        price_fallback_applied = 0
         for key, remote_pos in remote_by_key.items():
+            fallback_used = await self._apply_price_fallback_if_needed(remote_pos)
+            if fallback_used:
+                price_fallback_applied += 1
+
             matched_rows = local_by_key.get(key, [])
             if not matched_rows:
                 session.add(self._build_account_sync_position(remote_pos, now=now))
@@ -138,13 +143,14 @@ class PortfolioTracker:
             row.updated_at = now
             orphan_closed += 1
 
-        if synced_new or closed_stale or orphan_closed or dedup_closed:
+        if synced_new or closed_stale or orphan_closed or dedup_closed or price_fallback_applied:
             logger.info(
-                "Account position sync applied: new_open={} closed_stale={} orphan_closed={} dedup_closed={}",
+                "Account position sync applied: new_open={} closed_stale={} orphan_closed={} dedup_closed={} price_fallback={}",
                 synced_new,
                 closed_stale,
                 orphan_closed,
                 dedup_closed,
+                price_fallback_applied,
             )
         return (synced_new, closed_stale + orphan_closed + dedup_closed)
 
@@ -183,6 +189,33 @@ class PortfolioTracker:
         row.is_open = True
         row.closed_at = None
         row.updated_at = now
+
+    async def _apply_price_fallback_if_needed(self, row: WalletOpenPosition) -> bool:
+        """Patch clearly stale zero-valued marks from data-api with market fallback.
+
+        Some positions from /positions intermittently return `curPrice=0` and
+        `currentValue=0` even for active markets visible in Polymarket UI.
+        In that case we fallback to market mid/last price to avoid fake -100% U-PnL.
+        """
+
+        if row.quantity <= 0 or row.invested_usd <= 0:
+            return False
+
+        # Use data-api values whenever they are non-zero.
+        if row.current_price_cents > 0.0001 and row.current_value_usd > 0.0001:
+            return False
+
+        latest_price = await self.polymarket_client.fetch_market_mid_price(
+            market_id=row.market_id,
+            token_id=row.token_id,
+        )
+        if latest_price is None or latest_price <= 0:
+            return False
+
+        row.current_price_cents = latest_price
+        row.current_value_usd = max((row.quantity * latest_price) / 100, 0.0)
+        row.unrealized_pnl_usd = round(row.current_value_usd - row.invested_usd, 4)
+        return True
 
     async def recalculate_capital_base(self, session: AsyncSession, risk_mode: RiskMode) -> float:
         """Recalculate base capital from API and apply auto-reinvest when enabled."""
