@@ -112,3 +112,18 @@ export async function postControl(path: string, payload: Record<string, unknown>
   }
   return resp.json() as Promise<Record<string, unknown>>;
 }
+
+export interface PortfolioSnapshot {
+  taken_at: string;
+  total_equity_usd: number;
+  available_cash_usd: number;
+  exposure_usd: number;
+  cumulative_pnl_usd: number;
+}
+
+export async function fetchPortfolioHistory(limit = 200): Promise<PortfolioSnapshot[]> {
+  const resp = await fetch(`${getBaseUrl()}/portfolio_history?limit=${limit}`);
+  if (!resp.ok) throw new Error(`Portfolio History: HTTP ${resp.status}`);
+  const data = (await resp.json()) as PortfolioSnapshot[];
+  return data;
+}

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchPositions, fetchStatus, fetchTrades } from "@/lib/api";
+import { fetchPositions, fetchStatus, fetchTrades, fetchPortfolioHistory } from "@/lib/api";
 
 export function useBotStatus(refreshMs = 5000) {
   return useQuery({
@@ -24,6 +24,15 @@ export function useBotPositions(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-positions"],
     queryFn: () => fetchPositions(25),
+    refetchInterval: refreshMs,
+    retry: 1,
+  });
+}
+
+export function usePortfolioHistory(refreshMs = 5000) {
+  return useQuery({
+    queryKey: ["bot-portfolio-history"],
+    queryFn: () => fetchPortfolioHistory(100),
     refetchInterval: refreshMs,
     retry: 1,
   });

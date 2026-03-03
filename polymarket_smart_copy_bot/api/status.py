@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from data.database import get_session
+from models.models import PortfolioSnapshot
 
 router = APIRouter(tags=["status"])
 
@@ -36,3 +41,25 @@ async def status(request: Request) -> dict:
     payload.setdefault("last_discovery_stats", {})
     payload["status"] = "ok"
     return payload
+
+
+@router.get("/portfolio_history")
+async def portfolio_history(
+    request: Request,
+    limit: int = 200,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    query = select(PortfolioSnapshot).order_by(PortfolioSnapshot.taken_at.desc()).limit(limit)
+    result = await session.execute(query)
+    snapshots = result.scalars().all()
+
+    return [
+        {
+            "taken_at": s.taken_at.isoformat(),
+            "total_equity_usd": s.total_equity_usd,
+            "available_cash_usd": s.available_cash_usd,
+            "exposure_usd": s.exposure_usd,
+            "cumulative_pnl_usd": s.cumulative_pnl_usd,
+        }
+        for s in reversed(snapshots)
+    ]
