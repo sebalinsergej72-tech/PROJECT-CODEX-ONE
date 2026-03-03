@@ -397,8 +397,10 @@ class TradeExecutor:
         outcome: str,
         token_id: str | None,
     ) -> Position | None:
+        # Also match account_sync positions to find mirror-close candidates
+        # after live position sync has reassigned the wallet address.
         query = select(Position).where(
-            Position.wallet_address == wallet_address,
+            Position.wallet_address.in_([wallet_address, PortfolioTracker.ACCOUNT_SYNC_WALLET]),
             Position.market_id == market_id,
             Position.outcome == outcome,
             Position.is_open.is_(True),
@@ -455,12 +457,16 @@ class TradeExecutor:
 
     @staticmethod
     async def _upsert_position(session: AsyncSession, intent: TradeIntent, executed_size_usd: float) -> None:
+        # Search for an existing open position matching this market/outcome.
+        # In LIVE mode, account sync may have reassigned the wallet to
+        # "account_sync", so we look for both the original wallet and the
+        # sync sentinel to avoid creating duplicate position rows.
         query = select(Position).where(
-            Position.wallet_address == intent.wallet_address,
+            Position.wallet_address.in_([intent.wallet_address, PortfolioTracker.ACCOUNT_SYNC_WALLET]),
             Position.market_id == intent.market_id,
             Position.outcome == intent.outcome,
             Position.is_open.is_(True),
-        )
+        ).order_by(Position.opened_at.asc()).limit(1)
         position = (await session.execute(query)).scalar_one_or_none()
 
         execution_price_usd = max(intent.source_price_cents / 100.0, 0.01)

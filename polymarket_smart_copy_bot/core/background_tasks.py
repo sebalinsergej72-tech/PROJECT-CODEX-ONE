@@ -8,7 +8,7 @@ from typing import Any, TypeVar
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode, settings
@@ -840,6 +840,14 @@ class BackgroundOrchestrator:
         )
         return rows or []
 
+    async def get_open_positions_count(self) -> int:
+        """Return total count of open positions (no limit applied)."""
+        value = await self._in_session(
+            "open_positions_count",
+            lambda session: self._count_open_positions(session),
+        )
+        return int(value or 0)
+
     async def get_positions(self, *, open_only: bool = True, limit: int = 100) -> list[dict[str, Any]]:
         clamped_limit = max(1, min(limit, 200))
         rows = await self._in_session(
@@ -870,6 +878,11 @@ class BackgroundOrchestrator:
             }
             for row in rows
         ]
+
+    @staticmethod
+    async def _count_open_positions(session: AsyncSession) -> int:
+        query = select(func.count()).select_from(Position).where(Position.is_open.is_(True))
+        return int((await session.execute(query)).scalar_one())
 
     async def _fetch_positions(self, session: AsyncSession, *, open_only: bool, limit: int) -> list[dict[str, Any]]:
         query = select(Position).order_by(Position.updated_at.desc()).limit(limit)
