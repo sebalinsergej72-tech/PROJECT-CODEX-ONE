@@ -154,6 +154,27 @@ class PortfolioTracker:
             )
         return (synced_new, closed_stale + orphan_closed + dedup_closed)
 
+    async def clear_paper_positions(self, session: AsyncSession) -> int:
+        """Close and zero-out all paper positions when switching from DRY RUN to LIVE."""
+        query = select(Position).where(Position.is_open.is_(True))
+        positions = (await session.execute(query)).scalars().all()
+
+        closed = 0
+        now = datetime.now(tz=timezone.utc)
+        for position in positions:
+            position.is_open = False
+            position.closed_at = now
+            position.updated_at = now
+            position.quantity = 0.0
+            position.invested_usd = 0.0
+            position.unrealized_pnl_usd = 0.0
+            position.realized_pnl_usd = 0.0
+            closed += 1
+
+        if closed > 0:
+            logger.info("Cleared {} paper positions before switching to LIVE", closed)
+        return closed
+
     async def mark_to_market(self, session: AsyncSession) -> None:
         # In LIVE mode we keep PnL/prices authoritative from account position sync
         # (`currentValue` / `cashPnl` from data-api) to match Polymarket UI.

@@ -550,6 +550,10 @@ class BackgroundOrchestrator:
                 else max(self._last_portfolio_state.total_equity_usd, settings.default_starting_equity)
             )
             await self._in_session(
+                "clear_paper_positions",
+                lambda session: self.portfolio_tracker.clear_paper_positions(session),
+            )
+            await self._in_session(
                 "reset_live_pnl_baseline",
                 lambda session: self.portfolio_tracker.reset_pnl_baseline(session, baseline),
             )
