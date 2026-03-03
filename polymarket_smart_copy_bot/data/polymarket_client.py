@@ -61,6 +61,18 @@ class OrderResult:
     error: str | None = None
 
 
+@dataclass(slots=True)
+class OpenOrderInfo:
+    order_id: str
+    market_id: str | None
+    token_id: str | None
+    side: str
+    price_cents: float
+    size: float
+    created_at: datetime
+    raw: dict[str, Any]
+
+
 class PolymarketClient:
     """Polymarket data + order execution client with retry and timeout guards."""
 
@@ -405,6 +417,98 @@ class PolymarketClient:
             logger.exception("Order placement failed")
             return OrderResult(success=False, order_id=None, tx_hash=None, error=str(exc))
 
+    async def fetch_open_orders(
+        self,
+        *,
+        market_id: str | None = None,
+        token_id: str | None = None,
+    ) -> list[OpenOrderInfo] | None:
+        """Fetch current open orders for the authenticated account."""
+
+        if self._dry_run:
+            return []
+        if not settings.polymarket_private_key:
+            return None
+
+        try:
+            rows = await asyncio.to_thread(self._fetch_open_orders_sync, market_id, token_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch open orders: {}", exc)
+            return None
+
+        now = datetime.now(tz=timezone.utc)
+        orders: list[OpenOrderInfo] = []
+        for row in rows:
+            parsed = self._parse_open_order_row(row, now=now)
+            if parsed is not None:
+                orders.append(parsed)
+        return orders
+
+    async def cancel_stale_orders(
+        self,
+        *,
+        stale_after_seconds: int,
+        max_cancel: int,
+    ) -> dict[str, Any]:
+        """Cancel stale open orders older than the configured TTL."""
+
+        if self._dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "scanned": 0,
+                "stale": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "failed_ids": [],
+            }
+
+        open_orders = await self.fetch_open_orders()
+        if open_orders is None:
+            return {
+                "ok": False,
+                "dry_run": False,
+                "error": "open_orders_fetch_failed",
+                "scanned": 0,
+                "stale": 0,
+                "cancelled": 0,
+                "failed": 0,
+                "failed_ids": [],
+            }
+
+        now = datetime.now(tz=timezone.utc)
+        threshold = max(stale_after_seconds, 60)
+        stale_orders = [
+            order
+            for order in open_orders
+            if (now - order.created_at).total_seconds() >= threshold
+        ]
+        stale_orders.sort(key=lambda row: row.created_at)
+
+        to_cancel = stale_orders[: max(1, max_cancel)]
+        cancelled = 0
+        failed_ids: list[str] = []
+        for order in to_cancel:
+            try:
+                success = await asyncio.to_thread(self._cancel_order_sync, order.order_id)
+            except Exception as exc:
+                logger.warning("Failed to cancel stale order {}: {}", order.order_id, exc)
+                success = False
+            if success:
+                cancelled += 1
+            else:
+                failed_ids.append(order.order_id)
+
+        return {
+            "ok": True,
+            "dry_run": False,
+            "scanned": len(open_orders),
+            "stale": len(stale_orders),
+            "cancelled": cancelled,
+            "failed": len(failed_ids),
+            "failed_ids": failed_ids,
+        }
+
     async def diagnose_live_credentials(self) -> dict[str, Any]:
         """Validate live CLOB auth path using current runtime credentials."""
 
@@ -504,6 +608,34 @@ class PolymarketClient:
                 self._refresh_collateral_allowance_sync()
                 return clob_client.post_order(signed_order, OrderType.GTC)
             raise
+
+    def _fetch_open_orders_sync(self, market_id: str | None, token_id: str | None) -> list[dict[str, Any]]:
+        from py_clob_client.clob_types import OpenOrderParams
+
+        clob_client = self._ensure_clob_client()
+        params = OpenOrderParams(
+            market=market_id or None,
+            asset_id=token_id or None,
+        )
+        response = clob_client.get_orders(params=params)
+        if not isinstance(response, list):
+            return []
+        return [row for row in response if isinstance(row, dict)]
+
+    def _cancel_order_sync(self, order_id: str) -> bool:
+        clob_client = self._ensure_clob_client()
+        if not order_id:
+            return False
+        response = clob_client.cancel(order_id)
+        if isinstance(response, dict):
+            if str(response.get("canceled", "")).lower() == "true":
+                return True
+            if str(response.get("status", "")).lower() in {"ok", "success"}:
+                return True
+            if response.get("error"):
+                return False
+        # Some endpoints return non-uniform bodies; lack of exception is enough.
+        return True
 
     def _fetch_account_balance_sync(self) -> float | None:
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
@@ -764,6 +896,40 @@ class PolymarketClient:
             invested_usd=max(float(invested), 0.0),
             current_value_usd=max(float(current_value), 0.0),
             unrealized_pnl_usd=float(unrealized),
+        )
+
+    @staticmethod
+    def _parse_open_order_row(row: dict[str, Any], *, now: datetime) -> OpenOrderInfo | None:
+        order_id = str(row.get("id") or row.get("orderID") or row.get("orderId") or "").strip()
+        if not order_id:
+            return None
+
+        market_id = row.get("market") or row.get("marketId") or row.get("conditionId")
+        token_id = row.get("asset_id") or row.get("asset") or row.get("tokenId") or row.get("tokenID")
+        side = str(row.get("side") or row.get("type") or "").lower()
+
+        raw_price = PolymarketClient._parse_numeric(
+            row.get("price")
+            or row.get("limit_price")
+            or row.get("pricePaid")
+        )
+        price_cents = ensure_price_in_cents(raw_price) if raw_price and raw_price > 0 else 0.0
+        size = PolymarketClient._parse_numeric(row.get("size") or row.get("original_size") or row.get("amount")) or 0.0
+
+        ts_value = row.get("createdAt") or row.get("created_at") or row.get("timestamp") or row.get("placedAt")
+        created_at = PolymarketClient._parse_timestamp(ts_value)
+        if created_at > now:
+            created_at = now
+
+        return OpenOrderInfo(
+            order_id=order_id,
+            market_id=str(market_id) if market_id else None,
+            token_id=str(token_id) if token_id else None,
+            side=side,
+            price_cents=price_cents,
+            size=float(size),
+            created_at=created_at,
+            raw=row,
         )
 
     @staticmethod

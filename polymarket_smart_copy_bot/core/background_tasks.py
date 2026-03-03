@@ -56,6 +56,13 @@ async def scheduled_capital_recalc() -> None:
     await _ORCHESTRATOR_INSTANCE._run_capital_recalc_job()
 
 
+async def scheduled_stale_order_cleanup() -> None:
+    if _ORCHESTRATOR_INSTANCE is None:
+        logger.warning("Stale order cleanup job skipped: orchestrator is not initialized")
+        return
+    await _ORCHESTRATOR_INSTANCE._run_stale_order_cleanup_job()
+
+
 class BackgroundOrchestrator:
     """Owns scheduler lifecycle and all bot background jobs."""
 
@@ -110,6 +117,16 @@ class BackgroundOrchestrator:
         self.last_trade_scan_at: datetime | None = None
         self.last_portfolio_refresh_at: datetime | None = None
         self.last_capital_recalc_at: datetime | None = None
+        self.last_stale_order_cleanup_at: datetime | None = None
+        self._last_stale_order_cleanup: dict[str, Any] = {
+            "ok": True,
+            "dry_run": self._dry_run,
+            "scanned": 0,
+            "stale": 0,
+            "cancelled": 0,
+            "failed": 0,
+            "failed_ids": [],
+        }
         self._tracked_wallets_count = 0
         self._last_portfolio_state = PortfolioState(
             total_equity_usd=settings.default_starting_equity,
@@ -252,6 +269,16 @@ class BackgroundOrchestrator:
             max_instances=1,
             misfire_grace_time=120,
         )
+        self.scheduler.add_job(
+            scheduled_stale_order_cleanup,
+            trigger="interval",
+            seconds=settings.stale_order_cleanup_interval_seconds,
+            id="stale_order_cleanup",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=120,
+        )
 
     async def _run_wallet_discovery_job(self) -> None:
         await self._in_session("wallet_discovery", self._wallet_discovery_refresh)
@@ -265,6 +292,9 @@ class BackgroundOrchestrator:
     async def _run_capital_recalc_job(self) -> None:
         await self._in_session("capital_recalc", self._capital_recalc)
 
+    async def _run_stale_order_cleanup_job(self) -> None:
+        await self._in_session("stale_order_cleanup", self._stale_order_cleanup)
+
     async def _bootstrap_jobs(self) -> None:
         try:
             await self._in_session("restore_open_positions", self._restore_open_positions)
@@ -273,6 +303,7 @@ class BackgroundOrchestrator:
             await self._run_portfolio_refresh_job()
             await self._run_capital_recalc_job()
             await self._run_trade_monitor_job()
+            await self._run_stale_order_cleanup_job()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -367,6 +398,34 @@ class BackgroundOrchestrator:
         capital = await self.portfolio_tracker.recalculate_capital_base(session, risk_mode=self._risk_mode)
         self.last_capital_recalc_at = datetime.now(tz=timezone.utc)
         logger.info("Capital base recalculated: ${:.2f}", capital)
+
+    async def _stale_order_cleanup(self, session: AsyncSession) -> None:
+        del session  # no database writes required for this maintenance job
+        result = await self.polymarket_client.cancel_stale_orders(
+            stale_after_seconds=max(60, settings.stale_order_ttl_minutes * 60),
+            max_cancel=max(1, settings.stale_order_cancel_batch),
+        )
+        self._last_stale_order_cleanup = result
+        self.last_stale_order_cleanup_at = datetime.now(tz=timezone.utc)
+
+        if not result.get("ok", False):
+            logger.warning("Stale order cleanup failed: {}", result)
+            return
+
+        scanned = int(result.get("scanned", 0) or 0)
+        stale = int(result.get("stale", 0) or 0)
+        cancelled = int(result.get("cancelled", 0) or 0)
+        failed = int(result.get("failed", 0) or 0)
+        if cancelled or failed:
+            logger.warning(
+                "Stale order cleanup: scanned={} stale={} cancelled={} failed={}",
+                scanned,
+                stale,
+                cancelled,
+                failed,
+            )
+        else:
+            logger.debug("Stale order cleanup: scanned={} stale={} cancelled=0 failed=0", scanned, stale)
 
     async def _restore_open_positions(self, session: AsyncSession) -> None:
         await self.portfolio_tracker.restore_open_positions(session)
@@ -623,6 +682,8 @@ class BackgroundOrchestrator:
             "last_trade_scan_at": self._iso(self.last_trade_scan_at),
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
             "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
+            "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),
+            "last_stale_order_cleanup": self._last_stale_order_cleanup,
             "discovery_filter_stats": (
                 self.wallet_discovery.last_result.rejected_reasons if self.wallet_discovery.last_result else {}
             ),
@@ -712,6 +773,14 @@ class BackgroundOrchestrator:
             "ok": True,
             "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
             "total_equity_usd": self._last_portfolio_state.total_equity_usd,
+        }
+
+    async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
+        await self._run_stale_order_cleanup_job()
+        return {
+            "ok": bool(self._last_stale_order_cleanup.get("ok", False)),
+            "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),
+            "cleanup": self._last_stale_order_cleanup,
         }
 
     async def get_recent_trades(self, limit: int = 20) -> list[dict[str, Any]]:

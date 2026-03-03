@@ -177,3 +177,14 @@ async def control_capital_recalc(
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_capital_recalc_now()
     return {"status": "ok", **result}
+
+
+@router.post("/control/orders/cleanup")
+async def control_stale_orders_cleanup(
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.run_stale_order_cleanup_now()
+    return {"status": "ok", **result}

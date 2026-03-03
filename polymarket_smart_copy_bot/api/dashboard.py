@@ -71,6 +71,7 @@ async def dashboard() -> HTMLResponse:
       <button id=\"btnStop\" class=\"stop\" onclick=\"setTrading(false)\">Stop Trading</button>
       <button id=\"btnPaper\" class=\"paper\" onclick=\"setEngine(true)\">Paper Mode</button>
       <button id=\"btnLive\" class=\"live\" onclick=\"setEngine(false)\">Live Mode</button>
+      <button class=\"refresh\" onclick=\"cleanupOrders()\">Cleanup stale orders</button>
       <button class=\"refresh\" onclick=\"loadAll()\">Refresh now</button>
       <input id=\"token\" type=\"password\" placeholder=\"Dashboard write token (optional)\" />
       <span id=\"msg\" class=\"muted\"></span>
@@ -341,6 +342,24 @@ async function setTrading(enabled) {{
     await loadAll();
   }} catch (err) {{
     setMsg(`Action failed: ${{err.message || err}}`, true);
+  }}
+}}
+
+async function cleanupOrders() {{
+  try {{
+    const tokenInput = document.getElementById('token').value.trim();
+    if (tokenInput) {{
+      localStorage.setItem('dashboard_write_token', tokenInput);
+    }}
+    if (!requireTokenIfNeeded()) {{
+      return;
+    }}
+    const data = await postControl('/control/orders/cleanup', {{}});
+    const cleanup = data.cleanup || {{}};
+    setMsg(`Cleanup: cancelled=${{cleanup.cancelled || 0}}, stale=${{cleanup.stale || 0}}, failed=${{cleanup.failed || 0}}`);
+    await loadAll();
+  }} catch (err) {{
+    setMsg(`Cleanup failed: ${{err.message || err}}`, true);
   }}
 }}
 
