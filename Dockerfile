@@ -1,3 +1,20 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+COPY polymarket_smart_copy_bot/package.json ./package.json
+COPY polymarket_smart_copy_bot/package-lock.json ./package-lock.json
+RUN npm ci
+
+COPY polymarket_smart_copy_bot/index.html ./index.html
+COPY polymarket_smart_copy_bot/postcss.config.js ./postcss.config.js
+COPY polymarket_smart_copy_bot/tailwind.config.ts ./tailwind.config.ts
+COPY polymarket_smart_copy_bot/tsconfig.json ./tsconfig.json
+COPY polymarket_smart_copy_bot/vite.config.ts ./vite.config.ts
+COPY polymarket_smart_copy_bot/src ./src
+
+RUN npm run build
+
 FROM python:3.11-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -33,6 +50,7 @@ RUN pip install --upgrade pip \
     && rm -rf /wheels
 
 COPY polymarket_smart_copy_bot/ /app/
+COPY --from=frontend-builder /frontend/dist /app/dist
 RUN chown -R botuser:botuser /app
 
 USER botuser
