@@ -65,18 +65,38 @@ class PortfolioTracker:
                 )
             )
         ).scalars().all()
-        local_by_key: dict[str, Position] = {}
+        local_by_key: dict[str, list[Position]] = {}
         for row in local_rows:
             key = self._position_key(row.market_id, row.token_id, row.outcome)
-            local_by_key.setdefault(key, row)
+            local_by_key.setdefault(key, []).append(row)
 
         now = datetime.now(tz=timezone.utc)
         synced_new = 0
+        dedup_closed = 0
         for key, remote_pos in remote_by_key.items():
-            if key in local_by_key:
+            matched_rows = local_by_key.get(key, [])
+            if not matched_rows:
+                session.add(self._build_account_sync_position(remote_pos, now=now))
+                synced_new += 1
                 continue
-            session.add(self._build_account_sync_position(remote_pos, now=now))
-            synced_new += 1
+
+            primary = next(
+                (row for row in matched_rows if row.wallet_address == self.ACCOUNT_SYNC_WALLET),
+                matched_rows[0],
+            )
+            self._apply_remote_snapshot(primary, remote_pos, now=now)
+
+            # If duplicate DB rows exist for the same market/token/outcome key,
+            # keep one authoritative row and close extras to avoid double counting.
+            for row in matched_rows:
+                if row.id == primary.id:
+                    continue
+                row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
+                row.unrealized_pnl_usd = 0.0
+                row.is_open = False
+                row.closed_at = now
+                row.updated_at = now
+                dedup_closed += 1
 
         stale_account_rows = (
             await session.execute(
@@ -118,16 +138,22 @@ class PortfolioTracker:
             row.updated_at = now
             orphan_closed += 1
 
-        if synced_new or closed_stale or orphan_closed:
+        if synced_new or closed_stale or orphan_closed or dedup_closed:
             logger.info(
-                "Account position sync applied: new_open={} closed_stale={} orphan_closed={}",
+                "Account position sync applied: new_open={} closed_stale={} orphan_closed={} dedup_closed={}",
                 synced_new,
                 closed_stale,
                 orphan_closed,
+                dedup_closed,
             )
-        return (synced_new, closed_stale + orphan_closed)
+        return (synced_new, closed_stale + orphan_closed + dedup_closed)
 
     async def mark_to_market(self, session: AsyncSession) -> None:
+        # In LIVE mode we keep PnL/prices authoritative from account position sync
+        # (`currentValue` / `cashPnl` from data-api) to match Polymarket UI.
+        if not self.polymarket_client.is_dry_run():
+            return
+
         query = select(Position).where(Position.is_open.is_(True))
         positions = (await session.execute(query)).scalars().all()
 
@@ -145,6 +171,18 @@ class PortfolioTracker:
                 price_delta *= -1
             position.unrealized_pnl_usd = round(price_delta * position.quantity, 4)
             position.updated_at = datetime.now(tz=timezone.utc)
+
+    @classmethod
+    def _apply_remote_snapshot(cls, row: Position, remote: WalletOpenPosition, *, now: datetime) -> None:
+        row.quantity = max(float(remote.quantity), 0.0)
+        row.avg_price_cents = max(float(remote.avg_price_cents), 0.0)
+        row.current_price_cents = max(float(remote.current_price_cents), 0.0)
+        row.invested_usd = max(float(remote.invested_usd), 0.0)
+        row.unrealized_pnl_usd = float(remote.unrealized_pnl_usd)
+        row.wallet_address = cls.ACCOUNT_SYNC_WALLET
+        row.is_open = True
+        row.closed_at = None
+        row.updated_at = now
 
     async def recalculate_capital_base(self, session: AsyncSession, risk_mode: RiskMode) -> float:
         """Recalculate base capital from API and apply auto-reinvest when enabled."""
