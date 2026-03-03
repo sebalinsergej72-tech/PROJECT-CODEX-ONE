@@ -137,6 +137,14 @@ class BackgroundOrchestrator:
             open_positions=0,
             daily_drawdown_pct=0.0,
         )
+        self._last_exchange_balances: dict[str, Any] = {
+            "source": "unknown",
+            "free_balance_usd": None,
+            "positions_value_usd": None,
+            "total_balance_usd": None,
+            "positions_count": 0,
+            "updated_at": None,
+        }
         self._started = False
         self._bootstrap_task: asyncio.Task[None] | None = None
 
@@ -394,6 +402,7 @@ class BackgroundOrchestrator:
 
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
         self.last_portfolio_refresh_at = datetime.now(tz=timezone.utc)
+        await self._refresh_exchange_balances()
 
         if self._risk_mode == "aggressive" and self._last_portfolio_state.total_equity_usd >= 300:
             suggested = await self._get_runtime_bool(session, self.RUNTIME_KEY_CONSERVATIVE_SUGGESTED)
@@ -693,6 +702,7 @@ class BackgroundOrchestrator:
             "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
             "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),
             "last_stale_order_cleanup": self._last_stale_order_cleanup,
+            "account_balances": self._last_exchange_balances,
             "discovery_filter_stats": (
                 self.wallet_discovery.last_result.rejected_reasons if self.wallet_discovery.last_result else {}
             ),
@@ -768,6 +778,25 @@ class BackgroundOrchestrator:
         )
         if state is not None:
             self._last_portfolio_state = state
+
+    async def _refresh_exchange_balances(self) -> None:
+        """Refresh live balances directly from Polymarket for dashboard display."""
+
+        try:
+            balances = await self.polymarket_client.fetch_live_account_balances()
+        except Exception:
+            logger.exception("Failed to refresh live account balances from Polymarket")
+            return
+
+        now_iso = self._iso(datetime.now(tz=timezone.utc))
+        self._last_exchange_balances = {
+            "source": balances.get("source", "unknown"),
+            "free_balance_usd": balances.get("free_balance_usd"),
+            "positions_value_usd": balances.get("positions_value_usd"),
+            "total_balance_usd": balances.get("total_balance_usd"),
+            "positions_count": balances.get("positions_count", 0),
+            "updated_at": now_iso,
+        }
 
     async def run_trade_cycle_now(self) -> dict[str, Any]:
         if not self._trading_enabled:

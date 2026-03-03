@@ -365,6 +365,45 @@ class PolymarketClient:
             logger.warning("Failed to fetch account balance: {}", exc)
             return None
 
+    async def fetch_live_account_balances(self) -> dict[str, Any]:
+        """Fetch account balances strictly from Polymarket sources.
+
+        Returns free collateral (cash), open positions current value, and total.
+        """
+
+        if self._dry_run:
+            return {
+                "source": "dry_run",
+                "free_balance_usd": None,
+                "positions_value_usd": None,
+                "total_balance_usd": None,
+                "positions_count": 0,
+            }
+
+        free_balance = await self.fetch_account_balance_usd()
+        open_positions = await self.fetch_account_open_positions(limit=500)
+
+        positions_value: float | None = None
+        positions_count = 0
+        if open_positions is not None:
+            positions_count = len([row for row in open_positions if row.quantity > 0])
+            positions_value = round(
+                sum(max(float(row.current_value_usd), 0.0) for row in open_positions),
+                4,
+            )
+
+        total_balance: float | None = None
+        if free_balance is not None and positions_value is not None:
+            total_balance = round(float(free_balance) + positions_value, 4)
+
+        return {
+            "source": "polymarket",
+            "free_balance_usd": round(float(free_balance), 4) if free_balance is not None else None,
+            "positions_value_usd": positions_value,
+            "total_balance_usd": total_balance,
+            "positions_count": positions_count,
+        }
+
     async def place_order(self, request: OrderRequest) -> OrderResult:
         """Place an order through py-clob-client or simulate in DRY_RUN mode."""
 

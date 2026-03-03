@@ -10,6 +10,11 @@ function money(v: number) {
   return `$${v.toFixed(2)}`;
 }
 
+function moneyNullable(v: number | null | undefined) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `$${Number(v).toFixed(2)}`;
+}
+
 function pnlTone(v: number): "good" | "bad" | "neutral" {
   if (v > 0) return "good";
   if (v < 0) return "bad";
@@ -32,6 +37,21 @@ export function MetricsGrid({ status }: Props) {
     { label: "AutoAdd", value: status.discovery_autoadd ? "ON" : "OFF", tone: status.discovery_autoadd ? ("good" as const) : ("warn" as const) },
     { label: "Daily PnL", value: money(status.daily_pnl_usd || 0), tone: pnlTone(status.daily_pnl_usd || 0) },
     { label: "Cumulative PnL", value: money(status.cumulative_pnl_usd || 0), tone: pnlTone(status.cumulative_pnl_usd || 0) },
+    {
+      label: "Total Balance (PM)",
+      value: moneyNullable(status.account_balances?.total_balance_usd),
+      tone: "neutral" as const,
+    },
+    {
+      label: "Positions Value (PM)",
+      value: moneyNullable(status.account_balances?.positions_value_usd),
+      tone: "neutral" as const,
+    },
+    {
+      label: "Free Balance (PM)",
+      value: moneyNullable(status.account_balances?.free_balance_usd),
+      tone: "neutral" as const,
+    },
   ];
 
   return (

@@ -43,6 +43,14 @@ export interface BotStatus {
   discovery_passed_filters: number;
   discovery_filter_stats: Record<string, number>;
   last_discovery_stats?: DiscoveryStats;
+  account_balances?: {
+    source: string;
+    free_balance_usd: number | null;
+    positions_value_usd: number | null;
+    total_balance_usd: number | null;
+    positions_count: number;
+    updated_at: string | null;
+  };
 }
 
 export interface Trade {
