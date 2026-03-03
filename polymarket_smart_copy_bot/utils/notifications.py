@@ -15,6 +15,7 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -728,7 +729,14 @@ class NotificationService:
 
     @staticmethod
     def _keyboard() -> ReplyKeyboardMarkup:
+        from config.settings import settings
+        
+        url = f"{settings.bot_public_url}/dashboard"
+        if settings.dashboard_write_token:
+            url += f"?token={settings.dashboard_write_token}"
+            
         keyboard = [
+            [KeyboardButton("🌐 Открыть Dashboard", web_app=WebAppInfo(url=url))],
             [KeyboardButton(BTN_STATUS), KeyboardButton(BTN_PNL)],
             [KeyboardButton(BTN_TRADES), KeyboardButton(BTN_POSITIONS)],
             [KeyboardButton(BTN_MODE_AGGR), KeyboardButton(BTN_MODE_CONS)],

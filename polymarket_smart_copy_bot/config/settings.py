@@ -116,8 +116,16 @@ class Settings(BaseSettings):
     telegram_chat_id: int | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
     dashboard_write_token: str | None = Field(default=None, alias="DASHBOARD_WRITE_TOKEN")
     dashboard_refresh_seconds: int = Field(default=10, alias="DASHBOARD_REFRESH_SECONDS")
+    
+    railway_public_domain: str | None = Field(default=None, alias="RAILWAY_PUBLIC_DOMAIN")
 
     wallets_config_path: str = Field(default="config/wallets.yaml", alias="WALLETS_CONFIG_PATH")
+
+    @property
+    def bot_public_url(self) -> str:
+        if self.railway_public_domain:
+            return f"https://{self.railway_public_domain}"
+        return "http://localhost:8000"
 
     @property
     def resolved_wallets_config_path(self) -> Path:

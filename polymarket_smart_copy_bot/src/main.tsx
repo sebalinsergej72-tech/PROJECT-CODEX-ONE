@@ -15,6 +15,21 @@ const queryClient = new QueryClient({
   },
 });
 
+// Auto-login interceptor for Telegram / External Links
+const params = new URLSearchParams(window.location.search);
+const token = params.get("token");
+if (token) {
+  localStorage.setItem("dashboard_write_token", token);
+  // Clean URL without reloading the page
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
+
+// Telegram WebApp Initialization
+if (window.Telegram?.WebApp) {
+  window.Telegram.WebApp.ready();
+  window.Telegram.WebApp.expand();
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
