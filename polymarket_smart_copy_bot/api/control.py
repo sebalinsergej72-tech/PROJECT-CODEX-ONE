@@ -179,6 +179,17 @@ async def control_capital_recalc(
     return {"status": "ok", **result}
 
 
+@router.post("/control/portfolio/refresh")
+async def control_portfolio_refresh(
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.run_portfolio_refresh_now()
+    return {"status": "ok", **result}
+
+
 @router.post("/control/orders/cleanup")
 async def control_stale_orders_cleanup(
     request: Request,

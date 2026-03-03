@@ -99,7 +99,7 @@ class Settings(BaseSettings):
         default=5, alias="DISCOVERY_MAX_DAYS_SINCE_LAST_TRADE_CONSERVATIVE"
     )
     trade_monitor_interval_seconds: int = Field(default=60, alias="TRADE_MONITOR_INTERVAL_SECONDS")
-    portfolio_refresh_seconds: int = Field(default=300, alias="PORTFOLIO_REFRESH_SECONDS")
+    portfolio_refresh_seconds: int = Field(default=60, alias="PORTFOLIO_REFRESH_SECONDS")
     capital_recalc_interval_minutes: int = Field(default=60, alias="CAPITAL_RECALC_INTERVAL_MINUTES")
     stale_order_cleanup_interval_seconds: int = Field(
         default=180, alias="STALE_ORDER_CLEANUP_INTERVAL_SECONDS"

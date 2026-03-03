@@ -775,6 +775,17 @@ class BackgroundOrchestrator:
             "total_equity_usd": self._last_portfolio_state.total_equity_usd,
         }
 
+    async def run_portfolio_refresh_now(self) -> dict[str, Any]:
+        await self._run_portfolio_refresh_job()
+        await self._refresh_portfolio_state_from_db()
+        return {
+            "ok": True,
+            "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
+            "open_positions": self._last_portfolio_state.open_positions,
+            "exposure_usd": self._last_portfolio_state.exposure_usd,
+            "total_equity_usd": self._last_portfolio_state.total_equity_usd,
+        }
+
     async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
         await self._run_stale_order_cleanup_job()
         return {

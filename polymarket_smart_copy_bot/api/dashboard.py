@@ -72,7 +72,7 @@ async def dashboard() -> HTMLResponse:
       <button id=\"btnPaper\" class=\"paper\" onclick=\"setEngine(true)\">Paper Mode</button>
       <button id=\"btnLive\" class=\"live\" onclick=\"setEngine(false)\">Live Mode</button>
       <button class=\"refresh\" onclick=\"cleanupOrders()\">Cleanup stale orders</button>
-      <button class=\"refresh\" onclick=\"loadAll()\">Refresh now</button>
+      <button class=\"refresh\" onclick=\"refreshNow()\">Refresh now</button>
       <input id=\"token\" type=\"password\" placeholder=\"Dashboard write token (optional)\" />
       <span id=\"msg\" class=\"muted\"></span>
     </div>
@@ -189,6 +189,20 @@ async function loadAll() {{
   }} catch (err) {{
     setMsg(`Load failed: ${{err}}`, true);
   }}
+}}
+
+async function refreshNow() {{
+  if (!requireTokenIfNeeded()) return;
+  try {{
+    await fetch('/control/portfolio/refresh', {{
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({{}}),
+    }});
+  }} catch (err) {{
+    setMsg(`Portfolio refresh failed: ${{err}}`, true);
+  }}
+  await loadAll();
 }}
 
 function renderStatus(s) {{
