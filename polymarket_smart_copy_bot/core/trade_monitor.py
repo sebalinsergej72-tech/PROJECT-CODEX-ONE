@@ -219,7 +219,9 @@ class TradeMonitor:
         intents: list[TradeIntent] = []
 
         for local in local_open_positions:
-            if local.updated_at > reconcile_cutoff:
+            # Use opened_at here: updated_at is touched by mark-to-market refresh and would
+            # otherwise suppress reconciliation closes indefinitely.
+            if local.opened_at > reconcile_cutoff:
                 continue
 
             local_key = cls._position_key(local.market_id, local.token_id, local.outcome)
