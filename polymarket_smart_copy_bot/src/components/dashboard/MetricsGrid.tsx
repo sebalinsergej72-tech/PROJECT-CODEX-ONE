@@ -25,6 +25,7 @@ export function MetricsGrid({ status }: Props) {
     { label: "Risk Mode", value: (status.risk_mode || "-").toUpperCase(), tone: "neutral" as const },
     { label: "Wallets Tracked", value: String(status.tracked_wallets ?? "-"), tone: "neutral" as const },
     { label: "Open Positions", value: String(status.open_positions ?? "-"), tone: "neutral" as const },
+    { label: "Total Equity", value: money(status.total_equity_usd || 0), tone: "neutral" as const },
     { label: "Exposure", value: money(status.exposure_usd || 0), tone: "neutral" as const },
     { label: "Price Filter", value: status.price_filter_enabled ? "ON" : "OFF", tone: status.price_filter_enabled ? ("good" as const) : ("warn" as const) },
     { label: "Boost", value: status.high_conviction_boost_enabled ? "ON" : "OFF", tone: status.high_conviction_boost_enabled ? ("good" as const) : ("warn" as const) },

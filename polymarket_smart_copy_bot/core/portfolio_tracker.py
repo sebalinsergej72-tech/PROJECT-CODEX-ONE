@@ -185,6 +185,11 @@ class PortfolioTracker:
         row.current_price_cents = max(float(remote.current_price_cents), 0.0)
         row.invested_usd = max(float(remote.invested_usd), 0.0)
         row.unrealized_pnl_usd = float(remote.unrealized_pnl_usd)
+        # Reset realized PnL when syncing from API: the remote data is
+        # authoritative and already accounts for partial closes in
+        # invested_usd / unrealized_pnl_usd.  Stale realized_pnl values
+        # from previous local netting would otherwise double-count PnL.
+        row.realized_pnl_usd = 0.0
         row.wallet_address = cls.ACCOUNT_SYNC_WALLET
         row.is_open = True
         row.closed_at = None
@@ -216,6 +221,10 @@ class PortfolioTracker:
         row.current_value_usd = max((row.quantity * latest_price) / 100, 0.0)
         row.unrealized_pnl_usd = round(row.current_value_usd - row.invested_usd, 4)
         return True
+
+    async def update_capital_base(self, session: AsyncSession, balance: float) -> None:
+        """Update capital base directly from a fresh API balance value."""
+        await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, balance)
 
     async def recalculate_capital_base(self, session: AsyncSession, risk_mode: RiskMode) -> float:
         """Recalculate base capital from API and apply auto-reinvest when enabled."""
@@ -250,12 +259,16 @@ class PortfolioTracker:
         await session.execute(delete(PortfolioSnapshot))
 
     async def calculate_state(self, session: AsyncSession, risk_mode: RiskMode) -> PortfolioState:
-        positions_query = select(Position).where(Position.is_open.is_(True))
-        positions = (await session.execute(positions_query)).scalars().all()
+        open_positions_query = select(Position).where(Position.is_open.is_(True))
+        positions = (await session.execute(open_positions_query)).scalars().all()
 
         exposure = sum(position.invested_usd for position in positions)
         unrealized = sum(position.unrealized_pnl_usd for position in positions)
-        realized = sum(position.realized_pnl_usd for position in positions)
+
+        # Sum realized PnL from ALL positions (open AND closed) so that profits
+        # from closed trades are never lost from the equity calculation.
+        all_realized_query = select(func.coalesce(func.sum(Position.realized_pnl_usd), 0.0))
+        total_realized = float((await session.execute(all_realized_query)).scalar_one())
 
         capital_base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
         if capital_base is None:
@@ -265,18 +278,18 @@ class PortfolioTracker:
         if initial_capital is None:
             initial_capital = settings.default_starting_equity
 
-        # In DRY_RUN, `capital_base` behaves like full account equity baseline.
+        # In DRY_RUN, `capital_base` is the fixed starting equity.
+        # Total equity = starting capital + all realized PnL + current unrealized PnL.
         # In LIVE mode, `capital_base` comes from CLOB collateral balance (cash component),
-        # so total equity must include marked value of open positions as well.
+        # which already includes realized PnL, so we only add position market value.
         if self.polymarket_client.is_dry_run():
-            current_delta = realized + unrealized
+            current_delta = total_realized + unrealized
             total_equity = capital_base + current_delta
             available_cash = max(total_equity - exposure, 0.0)
         else:
             # Mark-to-market equity = cash collateral + current position value.
             # Current position value = invested_cost + unrealized_pnl.
             total_equity = capital_base + exposure + unrealized
-            # Realized PnL is already reflected in collateral balance in live mode.
             available_cash = max(capital_base, 0.0)
 
         cumulative_pnl = total_equity - initial_capital

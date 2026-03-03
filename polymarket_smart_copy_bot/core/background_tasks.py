@@ -383,6 +383,15 @@ class BackgroundOrchestrator:
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
         await self.portfolio_tracker.sync_account_open_positions(session)
         await self.portfolio_tracker.mark_to_market(session)
+
+        # Refresh capital_base from live API balance on every portfolio sync
+        # (not only during the hourly capital_recalc job) so that equity
+        # calculations stay accurate immediately after trades execute.
+        if not self._dry_run:
+            api_balance = await self.polymarket_client.fetch_account_balance_usd()
+            if api_balance is not None and api_balance > 0:
+                await self.portfolio_tracker.update_capital_base(session, api_balance)
+
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
         self.last_portfolio_refresh_at = datetime.now(tz=timezone.utc)
 

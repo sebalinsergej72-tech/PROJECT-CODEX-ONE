@@ -30,6 +30,7 @@ export interface BotStatus {
   risk_mode: string;
   tracked_wallets: number;
   open_positions: number;
+  total_equity_usd: number;
   exposure_usd: number;
   price_filter_enabled: boolean;
   high_conviction_boost_enabled: boolean;
@@ -57,7 +58,12 @@ export interface Trade {
 export interface Position {
   market_id: string;
   outcome: string;
+  side: string;
+  quantity: number;
+  avg_price_cents: number;
   invested_usd: number;
+  current_price_cents: number;
+  realized_pnl_usd: number;
   unrealized_pnl_usd: number;
   updated_at: string;
 }
