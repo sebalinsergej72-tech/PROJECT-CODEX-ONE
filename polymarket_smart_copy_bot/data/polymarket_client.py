@@ -44,6 +44,15 @@ class WalletOpenPosition:
 
 
 @dataclass(slots=True)
+class MarketInfoData:
+    """Minimal market metadata from the Gamma API."""
+
+    market_id: str
+    question: str
+    category: str
+
+
+@dataclass(slots=True)
 class OrderRequest:
     token_id: str
     side: str
@@ -349,6 +358,48 @@ class PolymarketClient:
                 return ensure_price_in_cents(price)
 
         return None
+
+    async def fetch_market_info(self, market_id: str) -> MarketInfoData:
+        """Fetch human-readable market question and category from the Gamma API.
+
+        Tries ``/markets/{market_id}`` then ``/events/{market_id}``.
+        Returns empty strings on any API failure so the caller can
+        fall back to displaying the raw ``market_id``.
+        """
+
+        question = ""
+        category = ""
+
+        candidate_urls = [
+            f"{settings.polymarket_gamma_host.rstrip('/')}/markets/{market_id}",
+            f"{settings.polymarket_gamma_host.rstrip('/')}/events/{market_id}",
+        ]
+
+        for url in candidate_urls:
+            try:
+                raw = await self._request_json("GET", url)
+            except Exception:
+                continue
+
+            if not isinstance(raw, dict):
+                continue
+
+            question = str(
+                raw.get("question")
+                or raw.get("title")
+                or raw.get("groupItemTitle")
+                or ""
+            )
+            tags = raw.get("tags")
+            category = str(
+                raw.get("category")
+                or (tags[0] if isinstance(tags, list) and tags else "")
+            )
+
+            if question:
+                break
+
+        return MarketInfoData(market_id=market_id, question=question, category=category)
 
     async def fetch_account_balance_usd(self) -> float | None:
         """Fetch current account balance for capital recalculation."""

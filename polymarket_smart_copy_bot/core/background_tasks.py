@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -19,7 +19,7 @@ from core.trade_monitor import TradeMonitor
 from core.wallet_discovery import WalletDiscovery
 from data.database import AsyncSessionFactory, get_scheduler_jobstore_url
 from data.polymarket_client import PolymarketClient
-from models.models import BotRuntimeState, CopiedTrade, Position
+from models.models import BotRuntimeState, CopiedTrade, MarketInfo, Position
 from utils.notifications import NotificationService
 
 _ORCHESTRATOR_INSTANCE: "BackgroundOrchestrator | None" = None
@@ -915,7 +915,7 @@ class BackgroundOrchestrator:
     async def _fetch_recent_trades(self, session: AsyncSession, limit: int) -> list[dict[str, Any]]:
         query = select(CopiedTrade).order_by(CopiedTrade.copied_at.desc()).limit(limit)
         rows = (await session.execute(query)).scalars().all()
-        return [
+        result = [
             {
                 "id": row.id,
                 "external_trade_id": row.external_trade_id,
@@ -934,6 +934,7 @@ class BackgroundOrchestrator:
             }
             for row in rows
         ]
+        return await self._enrich_with_market_info(session, result)
 
     @staticmethod
     async def _count_open_positions(session: AsyncSession) -> int:
@@ -946,7 +947,7 @@ class BackgroundOrchestrator:
             query = query.where(Position.is_open.is_(True))
 
         rows = (await session.execute(query)).scalars().all()
-        return [
+        result = [
             {
                 "id": row.id,
                 "wallet_address": row.wallet_address,
@@ -967,6 +968,83 @@ class BackgroundOrchestrator:
             }
             for row in rows
         ]
+        return await self._enrich_with_market_info(session, result)
+
+    async def _enrich_with_market_info(
+        self,
+        session: AsyncSession,
+        rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Add ``market_title`` and ``market_category`` to each row dict.
+
+        Uses the ``market_info`` cache table.  Missing or stale (>24 h)
+        entries are fetched from the Polymarket Gamma API and stored.
+        """
+
+        if not rows:
+            return rows
+
+        # 1. Collect unique market_ids
+        market_ids = list({r["market_id"] for r in rows if r.get("market_id")})
+        if not market_ids:
+            for r in rows:
+                r.setdefault("market_title", "")
+                r.setdefault("market_category", "")
+            return rows
+
+        # 2. Batch cache lookup
+        cached_rows = (
+            await session.execute(select(MarketInfo).where(MarketInfo.market_id.in_(market_ids)))
+        ).scalars().all()
+        cache: dict[str, MarketInfo] = {c.market_id: c for c in cached_rows}
+
+        # 3. Find missing / stale entries (TTL 24 h)
+        now = datetime.now(tz=timezone.utc)
+        ttl = timedelta(hours=24)
+        to_fetch = [
+            mid for mid in market_ids
+            if mid not in cache or (now - cache[mid].fetched_at) > ttl
+        ]
+
+        # 4. Fetch from Gamma API with concurrency limit
+        if to_fetch:
+            sem = asyncio.Semaphore(5)
+
+            async def _fetch_one(mid: str) -> tuple[str, str, str]:
+                async with sem:
+                    try:
+                        info = await self.polymarket_client.fetch_market_info(mid)
+                        return mid, info.question, info.category
+                    except Exception:
+                        logger.debug("Market info fetch failed for {}", mid)
+                        return mid, "", ""
+
+            results = await asyncio.gather(*[_fetch_one(mid) for mid in to_fetch])
+
+            # 5. Upsert cache
+            for mid, question, category in results:
+                existing = cache.get(mid)
+                if existing is not None:
+                    existing.question = question or existing.question
+                    existing.category = category or existing.category
+                    existing.fetched_at = now
+                else:
+                    entry = MarketInfo(
+                        market_id=mid,
+                        question=question,
+                        category=category,
+                        fetched_at=now,
+                    )
+                    session.add(entry)
+                    cache[mid] = entry
+
+        # 6. Enrich rows
+        for r in rows:
+            cached = cache.get(r.get("market_id", ""))
+            r["market_title"] = (cached.question if cached else "") or ""
+            r["market_category"] = (cached.category if cached else "") or ""
+
+        return rows
 
     async def _get_runtime_text(self, session: AsyncSession, key: str) -> str | None:
         row = (await session.execute(select(BotRuntimeState).where(BotRuntimeState.key == key))).scalar_one_or_none()

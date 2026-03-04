@@ -130,6 +130,17 @@ class PortfolioSnapshot(Base):
     taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
+class MarketInfo(Base):
+    """Cache of Polymarket market metadata fetched from the Gamma API."""
+
+    __tablename__ = "market_info"
+
+    market_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
 class BotRuntimeState(Base):
     __tablename__ = "bot_runtime_state"
 

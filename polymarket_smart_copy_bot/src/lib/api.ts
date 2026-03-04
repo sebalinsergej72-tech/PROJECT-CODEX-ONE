@@ -57,6 +57,8 @@ export interface Trade {
   copied_at: string;
   status: string;
   market_id: string;
+  market_title?: string;
+  market_category?: string;
   side: string;
   price_cents: number;
   size_usd: number;
@@ -64,7 +66,10 @@ export interface Trade {
 }
 
 export interface Position {
+  id: number;
   market_id: string;
+  market_title?: string;
+  market_category?: string;
   outcome: string;
   side: string;
   quantity: number;

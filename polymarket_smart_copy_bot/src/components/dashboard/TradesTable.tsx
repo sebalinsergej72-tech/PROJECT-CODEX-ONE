@@ -13,8 +13,33 @@ function shortAddr(v: string) {
   return v.length < 12 ? v : `${v.slice(0, 6)}…${v.slice(-4)}`;
 }
 
+function shortId(v: string) {
+  if (!v) return "-";
+  return v.length <= 12 ? v : `${v.slice(0, 6)}...${v.slice(-4)}`;
+}
+
 function money(v: number) {
   return `$${v.toFixed(2)}`;
+}
+
+const CATEGORY_COLORS: Record<string, string> = {
+  Politics: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  Sports: "bg-green-500/20 text-green-400 border-green-500/30",
+  Crypto: "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  Science: "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  "Pop Culture": "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  Pop_Culture: "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  Business: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
+};
+
+function categoryBadge(category: string | undefined) {
+  if (!category) return null;
+  const colors = CATEGORY_COLORS[category] || "bg-muted/50 text-muted-foreground border-border";
+  return (
+    <span className={`mt-0.5 inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider ${colors}`}>
+      {category.replace(/_/g, " ")}
+    </span>
+  );
 }
 
 export function TradesTable({ trades, status, isLoading }: Props) {
@@ -71,7 +96,12 @@ export function TradesTable({ trades, status, isLoading }: Props) {
                         {(t.copied_at || "-").replace("T", " ").slice(0, 19)}
                       </td>
                       <td className={`py-2 pr-3 font-mono text-xs font-bold uppercase ${statusColor}`}>{t.status || "-"}</td>
-                      <td className="max-w-[120px] truncate py-2 pr-3 font-mono text-xs">{t.market_id || "-"}</td>
+                      <td className="max-w-[200px] py-2 pr-3 text-xs" title={t.market_title || t.market_id || ""}>
+                        <span className="block truncate">
+                          {t.market_title || shortId(t.market_id || "")}
+                        </span>
+                        {categoryBadge(t.market_category)}
+                      </td>
                       <td className="py-2 pr-3 font-mono text-xs">
                         {(t.side || "-").toUpperCase()} @ {(t.price_cents || 0).toFixed(1)}¢
                       </td>

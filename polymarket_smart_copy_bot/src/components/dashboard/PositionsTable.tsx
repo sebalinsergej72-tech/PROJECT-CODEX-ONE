@@ -24,6 +24,31 @@ function cents(v: number) {
   return `${(v / 100).toFixed(2)}`;
 }
 
+function shortId(v: string) {
+  if (!v) return "-";
+  return v.length <= 12 ? v : `${v.slice(0, 6)}...${v.slice(-4)}`;
+}
+
+const CATEGORY_COLORS: Record<string, string> = {
+  Politics: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  Sports: "bg-green-500/20 text-green-400 border-green-500/30",
+  Crypto: "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  Science: "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  "Pop Culture": "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  Pop_Culture: "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  Business: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
+};
+
+function categoryBadge(category: string | undefined) {
+  if (!category) return null;
+  const colors = CATEGORY_COLORS[category] || "bg-muted/50 text-muted-foreground border-border";
+  return (
+    <span className={`mt-0.5 inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider ${colors}`}>
+      {category.replace(/_/g, " ")}
+    </span>
+  );
+}
+
 export function PositionsTable({ positions, isLoading }: Props) {
   const { mutate: closePosition, isPending: isClosing } = useClosePosition();
   const [closingId, setClosingId] = useState<number | null>(null);
@@ -80,7 +105,12 @@ export function PositionsTable({ positions, isLoading }: Props) {
                 const curValue = (qty * curPrice) / 100;
                 return (
                   <tr key={`${p.market_id}-${p.outcome}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
-                    <td className="max-w-[140px] truncate py-2 pr-3 font-mono text-xs">{p.market_id || "-"}</td>
+                    <td className="max-w-[220px] py-2 pr-3 text-xs" title={p.market_title || p.market_id || ""}>
+                      <span className="block truncate">
+                        {p.market_title || shortId(p.market_id || "")}
+                      </span>
+                      {categoryBadge(p.market_category)}
+                    </td>
                     <td className="py-2 pr-3 font-mono text-xs">{p.outcome || "-"}</td>
                     <td className="py-2 pr-3 font-mono text-xs font-semibold uppercase">{p.side || "-"}</td>
                     <td className="py-2 pr-3 font-mono text-xs">{qty.toFixed(1)}</td>
