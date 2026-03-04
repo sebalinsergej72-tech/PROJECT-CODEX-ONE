@@ -53,11 +53,8 @@ def test_dashboard_page_renders() -> None:
         response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert "Polymarket Smart Copy Bot" in response.text
-    assert "Start Trading" in response.text
-    assert "Stop Trading" in response.text
-    assert "Paper Mode" in response.text
-    assert "Live Mode" in response.text
+    assert "id=\"root\"" in response.text
+    assert "telegram-web-app.js" in response.text
 
 
 def test_control_trading_toggles() -> None:

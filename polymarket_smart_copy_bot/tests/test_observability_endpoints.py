@@ -24,6 +24,9 @@ class DummyOrchestrator:
             }
         ][:limit]
 
+    async def get_open_positions_count(self) -> int:
+        return 1
+
     async def get_positions(self, *, open_only: bool = True, limit: int = 100) -> list[dict]:
         rows = [
             {
