@@ -199,3 +199,20 @@ async def control_stale_orders_cleanup(
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_stale_order_cleanup_now()
     return {"status": "ok", **result}
+
+
+@router.post("/control/positions/{position_id}/close")
+async def control_close_position(
+    position_id: int,
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.manual_close_position(position_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400, 
+            detail=result.get("error", "Failed to close position manually")
+        )
+    return {"status": "ok", **result}

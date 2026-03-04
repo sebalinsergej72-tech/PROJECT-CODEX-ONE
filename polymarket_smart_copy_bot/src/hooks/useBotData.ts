@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
-import { fetchPositions, fetchStatus, fetchTrades, fetchPortfolioHistory } from "@/lib/api";
+import { fetchPositions, fetchStatus, fetchTrades, fetchPortfolioHistory, fetchLeaderboard, closePosition } from "@/lib/api";
 
 export function useBotStatus(refreshMs = 5000) {
   return useQuery({
@@ -35,5 +36,31 @@ export function usePortfolioHistory(refreshMs = 5000) {
     queryFn: () => fetchPortfolioHistory(100),
     refetchInterval: refreshMs,
     retry: 1,
+  });
+}
+
+export function useLeaderboard(refreshMs = 15000) {
+  return useQuery({
+    queryKey: ["leaderboard"],
+    queryFn: () => fetchLeaderboard(50),
+    refetchInterval: refreshMs,
+    retry: 1,
+  });
+}
+
+export function useClosePosition() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (positionId: number) => closePosition(positionId),
+    onSuccess: () => {
+      toast.success("Position close requested successfully");
+      queryClient.invalidateQueries({ queryKey: ["bot-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["bot-portfolio-history"] });
+      queryClient.invalidateQueries({ queryKey: ["bot-status"] });
+    },
+    onError: (error) => {
+      toast.error(`Failed to close position: ${error.message}`);
+    },
   });
 }

@@ -9,6 +9,7 @@ import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { StatusBanner } from "@/components/dashboard/StatusBanner";
 import { TradesTable } from "@/components/dashboard/TradesTable";
 import { YieldChart } from "@/components/dashboard/YieldChart";
+import { LeaderboardTable } from "@/components/dashboard/LeaderboardTable";
 import { useBotPositions, useBotStatus, useBotTrades } from "@/hooks/useBotData";
 
 const Index = () => {
@@ -53,6 +54,7 @@ const Index = () => {
           <StatusBanner status={status} isLoading={statusLoading} isError={statusError} />
           <ControlPanel status={status} />
           <YieldChart />
+          <LeaderboardTable />
           <MetricsGrid status={status} />
           <DiscoveryDiag status={status} />
           <div className="grid gap-4 lg:grid-cols-2">

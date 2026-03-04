@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from data.database import get_session
-from models.models import PortfolioSnapshot
+from models.models import PortfolioSnapshot, WalletScore
 
 router = APIRouter(tags=["status"])
 
@@ -62,4 +62,36 @@ async def portfolio_history(
             "cumulative_pnl_usd": s.cumulative_pnl_usd,
         }
         for s in reversed(snapshots)
+    ]
+
+
+@router.get("/leaderboard")
+async def leaderboard(
+    request: Request,
+    limit: int = 50,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    query = (
+        select(WalletScore)
+        .order_by(WalletScore.score.desc(), WalletScore.win_rate.desc())
+        .limit(limit)
+    )
+    result = await session.execute(query)
+    scores = result.scalars().all()
+
+    return [
+        {
+            "wallet_address": s.wallet_address,
+            "label": s.label,
+            "score": s.score,
+            "win_rate": s.win_rate,
+            "roi_30d": s.roi_30d,
+            "total_volume_30d": s.total_volume_30d,
+            "trade_count_30d": s.trade_count_30d,
+            "trade_count_90d": s.trade_count_90d,
+            "total_volume_90d": s.total_volume_90d,
+            "profit_factor": s.profit_factor,
+            "avg_position_size": s.avg_position_size,
+        }
+        for s in scores
     ]

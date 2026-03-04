@@ -823,18 +823,70 @@ class BackgroundOrchestrator:
         return {
             "ok": True,
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
-            "open_positions": self._last_portfolio_state.open_positions,
-            "exposure_usd": self._last_portfolio_state.exposure_usd,
-            "total_equity_usd": self._last_portfolio_state.total_equity_usd,
         }
 
-    async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
-        await self._run_stale_order_cleanup_job()
-        return {
-            "ok": bool(self._last_stale_order_cleanup.get("ok", False)),
-            "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),
-            "cleanup": self._last_stale_order_cleanup,
-        }
+    async def manual_close_position(self, position_id: int) -> dict:
+        """Manually force close an open position by placing a market-equivalent sell order."""
+        if self._dry_run:
+            return {"success": False, "error": "Cannot manually close positions in dry_run mode."}
+
+        async with self._db_session() as session:
+            query = select(Position).where(Position.id == position_id, Position.is_open.is_(True))
+            position = (await session.execute(query)).scalar_one_or_none()
+            if not position:
+                return {"success": False, "error": f"Open position {position_id} not found."}
+
+            if not position.token_id or position.quantity <= 0:
+                return {"success": False, "error": "Position missing token_id or has 0 quantity."}
+
+            # To sell out effectively we place a sell order for the current holdings.
+            # Using price 0 or minimal valid price (e.g. 0.1 cents) to act like a market order or limit at bottom.
+            from data.polymarket_client import OrderRequest
+            from core.trade_monitor import TradeIntent
+            from datetime import datetime, timezone
+            
+            # Use size_usd = quantity * 1.0 (assuming maximum payout per share is 1)
+            # Or in this bot's notation size is just token quantity if price is unknown,
+            # but PolymarketClient expects size_usd (size to buy/sell).
+            
+            # Execute directly via the client to ensure it goes through immediately.
+            sell_request = OrderRequest(
+                token_id=position.token_id,
+                side="sell",
+                price_cents=0.1,  # Minimum valid price tick
+                size_usd=position.quantity, 
+                market_id=position.market_id,
+                outcome=position.outcome,
+            )
+            
+            logger.info("Manual Close requested for Position {}: Sell {} shares of {}/{}", 
+                        position_id, position.quantity, position.market_id, position.outcome)
+            
+            result = await self.polymarket_client.place_order(sell_request)
+            
+            if not result.success:
+                logger.error("Manual close failed for Position {}: {}", position_id, result.error)
+                return {"success": False, "error": f"API Error: {result.error}"}
+            
+            # If successful, mark position as closed
+            position.is_open = False
+            position.closed_at = datetime.now(tz=timezone.utc)
+            position.realized_pnl_usd = position.unrealized_pnl_usd
+            position.unrealized_pnl_usd = 0.0
+            await session.commit()
+            
+            await self.notifications.send_message(
+                f"🛑 <b>Manual Close</b>\n{position.market_id} | {position.outcome}\nQuantity: {position.quantity:.2f}"
+            )
+            
+            # Kick off async sync of balance / portfolios
+            asyncio.create_task(self.run_portfolio_refresh_now())
+            
+            return {
+                "success": True, 
+                "tx_hash": result.tx_hash,
+                "order_id": result.order_id
+            }
 
     async def get_recent_trades(self, limit: int = 20) -> list[dict[str, Any]]:
         clamped_limit = max(1, min(limit, 200))

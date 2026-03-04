@@ -1,6 +1,9 @@
 import { motion } from "framer-motion";
+import { useState } from "react";
 
 import type { Position } from "@/lib/api";
+import { useClosePosition } from "@/hooks/useBotData";
+import { X, Loader2 } from "lucide-react";
 
 interface Props {
   positions: Position[] | undefined;
@@ -22,7 +25,17 @@ function cents(v: number) {
 }
 
 export function PositionsTable({ positions, isLoading }: Props) {
-  const cols = ["Market", "Outcome", "Side", "Qty", "Avg Price", "Cur Price", "Invested", "Cur Value", "U-PnL", "Updated"];
+  const { mutate: closePosition, isPending: isClosing } = useClosePosition();
+  const [closingId, setClosingId] = useState<number | null>(null);
+
+  const handleClose = (id: number) => {
+    setClosingId(id);
+    closePosition(id, {
+      onSettled: () => setClosingId(null)
+    });
+  };
+
+  const cols = ["Market", "Outcome", "Side", "Qty", "Avg Price", "Cur Price", "Invested", "Cur Value", "U-PnL", "Updated", "Action"];
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="trading-card overflow-hidden">
@@ -41,14 +54,14 @@ export function PositionsTable({ positions, isLoading }: Props) {
           <tbody>
             {isLoading
               ? Array.from({ length: 3 }).map((_, i) => (
-                  <tr key={i} className="border-b border-border/50">
-                    {Array.from({ length: cols.length }).map((__, j) => (
-                      <td key={j} className="py-2 pr-3">
-                        <div className="h-4 w-16 animate-pulse rounded bg-muted" />
-                      </td>
-                    ))}
-                  </tr>
-                ))
+                <tr key={i} className="border-b border-border/50">
+                  {Array.from({ length: cols.length }).map((__, j) => (
+                    <td key={j} className="py-2 pr-3">
+                      <div className="h-4 w-16 animate-pulse rounded bg-muted" />
+                    </td>
+                  ))}
+                </tr>
+              ))
               : null}
 
             {!isLoading && !positions?.length ? (
@@ -61,27 +74,41 @@ export function PositionsTable({ positions, isLoading }: Props) {
 
             {!isLoading
               ? positions?.map((p, i) => {
-                  const uPnl = p.unrealized_pnl_usd || 0;
-                  const qty = p.quantity || 0;
-                  const curPrice = p.current_price_cents || 0;
-                  const curValue = (qty * curPrice) / 100;
-                  return (
-                    <tr key={`${p.market_id}-${p.outcome}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
-                      <td className="max-w-[140px] truncate py-2 pr-3 font-mono text-xs">{p.market_id || "-"}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{p.outcome || "-"}</td>
-                      <td className="py-2 pr-3 font-mono text-xs font-semibold uppercase">{p.side || "-"}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{qty.toFixed(1)}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{cents(p.avg_price_cents || 0)}</td>
-                      <td className="py-2 pr-3 font-mono text-xs">{cents(curPrice)}</td>
-                      <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(p.invested_usd || 0)}</td>
-                      <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(curValue)}</td>
-                      <td className={`py-2 pr-3 font-mono text-xs font-bold ${pnlClass(uPnl)}`}>{money(uPnl)}</td>
-                      <td className="py-2 font-mono text-xs text-muted-foreground">
-                        {(p.updated_at || "-").replace("T", " ").slice(0, 19)}
-                      </td>
-                    </tr>
-                  );
-                })
+                const uPnl = p.unrealized_pnl_usd || 0;
+                const qty = p.quantity || 0;
+                const curPrice = p.current_price_cents || 0;
+                const curValue = (qty * curPrice) / 100;
+                return (
+                  <tr key={`${p.market_id}-${p.outcome}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
+                    <td className="max-w-[140px] truncate py-2 pr-3 font-mono text-xs">{p.market_id || "-"}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{p.outcome || "-"}</td>
+                    <td className="py-2 pr-3 font-mono text-xs font-semibold uppercase">{p.side || "-"}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{qty.toFixed(1)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{cents(p.avg_price_cents || 0)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{cents(curPrice)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(p.invested_usd || 0)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(curValue)}</td>
+                    <td className={`py-2 pr-3 font-mono text-xs font-bold ${pnlClass(uPnl)}`}>{money(uPnl)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
+                      {(p.updated_at || "-").replace("T", " ").slice(0, 19)}
+                    </td>
+                    <td className="py-2">
+                      <button
+                        onClick={() => handleClose(p.id)}
+                        disabled={isClosing && closingId === p.id}
+                        className="flex h-6 w-6 items-center justify-center rounded bg-destructive/10 text-destructive transition-colors hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
+                        title="Force Sell Market Price"
+                      >
+                        {isClosing && closingId === p.id ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <X className="h-3 w-3" />
+                        )}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
               : null}
           </tbody>
         </table>

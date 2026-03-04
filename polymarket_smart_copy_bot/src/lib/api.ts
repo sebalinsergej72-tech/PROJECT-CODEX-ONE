@@ -127,3 +127,40 @@ export async function fetchPortfolioHistory(limit = 200): Promise<PortfolioSnaps
   const data = (await resp.json()) as PortfolioSnapshot[];
   return data;
 }
+
+export interface WalletScore {
+  wallet_address: string;
+  label?: string;
+  score: number;
+  win_rate: number;
+  roi_30d: number;
+  total_volume_30d: number;
+  trade_count_30d: number;
+  trade_count_90d: number;
+  total_volume_90d: number;
+  profit_factor: number;
+  avg_position_size: number;
+}
+
+export async function fetchLeaderboard(limit = 50): Promise<WalletScore[]> {
+  const resp = await fetch(`${getBaseUrl()}/leaderboard?limit=${limit}`);
+  if (!resp.ok) throw new Error(`Leaderboard: HTTP ${resp.status}`);
+  const data = (await resp.json()) as WalletScore[];
+  return data;
+}
+
+export async function closePosition(positionId: number): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${getBaseUrl()}/control/positions/${positionId}/close`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  if (!resp.ok) {
+    let errDetail = `HTTP ${resp.status}`;
+    try {
+      const err = await resp.json();
+      errDetail = err.detail || err.error || err.message || errDetail;
+    } catch { }
+    throw new Error(errDetail);
+  }
+  return resp.json();
+}
