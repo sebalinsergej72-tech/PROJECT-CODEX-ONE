@@ -30,10 +30,10 @@ export function useBotPositions(refreshMs = 5000) {
   });
 }
 
-export function usePortfolioHistory(refreshMs = 5000) {
+export function usePortfolioHistory(hours = 24, refreshMs = 30000) {
   return useQuery({
-    queryKey: ["bot-portfolio-history"],
-    queryFn: () => fetchPortfolioHistory(100),
+    queryKey: ["bot-portfolio-history", hours],
+    queryFn: () => fetchPortfolioHistory(hours),
     refetchInterval: refreshMs,
     retry: 1,
   });

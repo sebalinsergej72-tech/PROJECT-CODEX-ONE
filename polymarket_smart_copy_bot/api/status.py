@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Depends
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,10 +48,17 @@ async def status(request: Request) -> dict:
 @router.get("/portfolio_history")
 async def portfolio_history(
     request: Request,
-    limit: int = 200,
+    hours: int = Query(default=24, ge=1, le=168),
+    limit: int = Query(default=2000, ge=1, le=10000),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:
-    query = select(PortfolioSnapshot).order_by(PortfolioSnapshot.taken_at.desc()).limit(limit)
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    query = (
+        select(PortfolioSnapshot)
+        .where(PortfolioSnapshot.taken_at >= since)
+        .order_by(PortfolioSnapshot.taken_at.asc())
+        .limit(limit)
+    )
     result = await session.execute(query)
     snapshots = result.scalars().all()
 
@@ -61,7 +70,7 @@ async def portfolio_history(
             "exposure_usd": s.exposure_usd,
             "cumulative_pnl_usd": s.cumulative_pnl_usd,
         }
-        for s in reversed(snapshots)
+        for s in snapshots
     ]
 
 
