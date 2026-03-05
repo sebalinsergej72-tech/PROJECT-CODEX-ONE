@@ -360,31 +360,38 @@ class PolymarketClient:
         return None
 
     async def fetch_market_info(self, market_id: str) -> MarketInfoData:
-        """Fetch human-readable market question and category from the Gamma API.
+        """Fetch human-readable market question and category.
 
-        The Gamma API may return either a single dict or a list of market dicts
-        depending on the endpoint and conditionId format.  We handle both.
+        Tries multiple API endpoints in order of reliability:
+          1. CLOB API  GET /markets/{condition_id}          – most reliable, path-based
+          2. Gamma API GET /markets/{market_id}             – path-based
+          3. Gamma API GET /events/{market_id}              – event-level fallback
+          4. Gamma API GET /markets?condition_id={id}       – filtered list (snake_case)
+          5. Gamma API GET /markets?conditionId={id}        – filtered list (camelCase)
 
-        Tries multiple URL patterns:
-          1. GET /markets?conditionIds={market_id}  (returns list, most reliable)
-          2. GET /markets/{market_id}               (may return list or dict)
-          3. GET /events/{market_id}                (fallback)
-        Returns empty strings on any API failure so callers show raw market_id.
+        For list responses we match by conditionId field; a list with a single
+        item is used directly (the API filtered correctly).  A multi-item list
+        with no ID match is skipped so we never return a mismatched market.
+        Returns empty strings on all failures so callers show the raw market_id.
         """
+
+        clob = settings.polymarket_host.rstrip("/")
+        gamma = settings.polymarket_gamma_host.rstrip("/")
+        target_id = market_id.strip().lower()
+
+        candidate_requests: list[tuple[str, dict]] = [
+            # 1. CLOB REST API – accepts conditionId directly in the path
+            (f"{clob}/markets/{market_id}", {}),
+            # 2-3. Gamma path-based
+            (f"{gamma}/markets/{market_id}", {}),
+            (f"{gamma}/events/{market_id}", {}),
+            # 4-5. Gamma query-param variants (may return filtered list)
+            (f"{gamma}/markets", {"condition_id": market_id}),
+            (f"{gamma}/markets", {"conditionId": market_id}),
+        ]
 
         question = ""
         category = ""
-
-        gamma = settings.polymarket_gamma_host.rstrip("/")
-        candidate_requests: list[tuple[str, dict]] = [
-            # Most reliable: conditionIds query parameter returns a list
-            (f"{gamma}/markets", {"conditionIds": market_id}),
-            # Path-based endpoints (response may be dict or list)
-            (f"{gamma}/markets/{market_id}", {}),
-            (f"{gamma}/events/{market_id}", {}),
-        ]
-
-        target_id = market_id.strip().lower()
 
         for url, params in candidate_requests:
             try:
@@ -392,40 +399,14 @@ class PolymarketClient:
             except Exception:
                 continue
 
-            # Normalise: Gamma may return a list or a single dict
-            market_obj: dict | None = None
-            if isinstance(raw, dict):
-                market_obj = raw
-            elif isinstance(raw, list):
-                dict_items = [item for item in raw if isinstance(item, dict)]
-                # First priority: exact match on conditionId / id field so that
-                # a generic /markets list doesn't return a mismatched market.
-                market_obj = next(
-                    (
-                        item for item in dict_items
-                        if str(
-                            item.get("conditionId")
-                            or item.get("condition_id")
-                            or item.get("id")
-                            or ""
-                        ).strip().lower() == target_id
-                    ),
-                    None,
-                )
-                # If no ID match but the API returned exactly one result, trust it
-                # (the endpoint likely filtered correctly by our query parameter).
-                if market_obj is None and len(dict_items) == 1:
-                    market_obj = dict_items[0]
-                # Multiple items with no ID match → the API ignored our filter;
-                # skip this URL and try the next candidate instead.
-
+            market_obj = self._extract_market_obj(raw, target_id)
             if market_obj is None:
                 continue
 
             question = str(
                 market_obj.get("question")
-                or market_obj.get("title")
                 or market_obj.get("groupItemTitle")
+                or market_obj.get("title")
                 or ""
             )
             tags = market_obj.get("tags")
@@ -435,9 +416,37 @@ class PolymarketClient:
             )
 
             if question:
+                logger.debug("Resolved market info for {} from {}: {}", target_id, url, question[:60])
                 break
 
         return MarketInfoData(market_id=market_id, question=question, category=category)
+
+    @staticmethod
+    def _extract_market_obj(raw: Any, target_id: str) -> dict | None:
+        """Extract the matching market dict from a raw API response.
+
+        Returns None if the response cannot be reliably attributed to target_id
+        (e.g., an unfiltered list of multiple markets).
+        """
+        if isinstance(raw, dict):
+            # Single-dict response: use it directly (path-based endpoints)
+            return raw
+        if isinstance(raw, list):
+            dict_items = [item for item in raw if isinstance(item, dict)]
+            if not dict_items:
+                return None
+            # Try exact match on conditionId field
+            for item in dict_items:
+                cid = str(
+                    item.get("conditionId") or item.get("condition_id") or ""
+                ).strip().lower()
+                if cid == target_id:
+                    return item
+            # Single item → trust that the API filtered correctly
+            if len(dict_items) == 1:
+                return dict_items[0]
+            # Multiple items with no ID match → API ignored our filter; skip
+        return None
 
     async def fetch_account_balance_usd(self) -> float | None:
         """Fetch current account balance for capital recalculation."""
