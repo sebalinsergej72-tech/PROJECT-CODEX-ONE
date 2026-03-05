@@ -45,6 +45,10 @@ class RiskManager:
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
     ) -> RiskDecision:
+        # IMPROVED: First check global max drawdown limits
+        if self._global_drawdown_triggered(portfolio, risk_mode):
+            return RiskDecision(False, "global_drawdown_limit_reached", 0.0, False)
+
         if self._drawdown_stop_triggered(portfolio, risk_mode):
             return RiskDecision(False, "drawdown_stop_triggered", 0.0, False)
 
@@ -75,7 +79,7 @@ class RiskManager:
         )
 
     def should_trigger_drawdown_stop(self, portfolio: PortfolioState, risk_mode: RiskMode) -> bool:
-        return self._drawdown_stop_triggered(portfolio, risk_mode)
+        return self._global_drawdown_triggered(portfolio, risk_mode) or self._drawdown_stop_triggered(portfolio, risk_mode)
 
     def _evaluate_aggressive(
         self,
@@ -109,6 +113,9 @@ class RiskManager:
             and source_size_usd > (wallet_avg_trade_size_usd * 2)
         ):
             wallet_multiplier *= settings.high_conviction_multiplier
+
+        # IMPROVED: Strict safety cap to ensure multiplier isn't blown up to dangerous levels 
+        wallet_multiplier = min(wallet_multiplier, 2.5)
 
         kelly_fraction = self._light_kelly_fraction(
             win_rate=wallet_win_rate,
@@ -198,6 +205,21 @@ class RiskManager:
         kelly = max(((b * p) - q) / b, 0.0)
         # Light Kelly to reduce overbetting noise, then apply strategy multiplier.
         return min(kelly * 0.25 * multiplier, 0.22)
+
+    @staticmethod
+    def _global_drawdown_triggered(portfolio: PortfolioState, risk_mode: RiskMode) -> bool:
+        # IMPROVED: Prevent all trading if all-time capital falls below dangerous thresholds
+        if portfolio.cumulative_pnl_usd >= 0:
+            return False
+            
+        initial_equity = portfolio.total_equity_usd - portfolio.cumulative_pnl_usd
+        if initial_equity <= 0:
+            return False
+            
+        global_drawdown_pct = abs(portfolio.cumulative_pnl_usd) / initial_equity
+        limit = 0.20 if risk_mode == "aggressive" else 0.15
+        
+        return global_drawdown_pct >= limit
 
     @staticmethod
     def _drawdown_stop_triggered(portfolio: PortfolioState, risk_mode: RiskMode) -> bool:
