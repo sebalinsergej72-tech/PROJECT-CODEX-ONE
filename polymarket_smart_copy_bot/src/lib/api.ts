@@ -54,8 +54,11 @@ export interface BotStatus {
 }
 
 export interface Trade {
-  copied_at: string;
-  status: string;
+  copied_at?: string;
+  status?: string;
+  reason?: string | null;
+  tx_hash?: string;
+  source_timestamp?: string;
   market_id: string;
   market_title?: string;
   market_category?: string;
