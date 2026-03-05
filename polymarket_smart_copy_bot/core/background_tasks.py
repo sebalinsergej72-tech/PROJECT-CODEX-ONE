@@ -19,7 +19,7 @@ from core.trade_monitor import TradeMonitor
 from core.wallet_discovery import WalletDiscovery
 from data.database import AsyncSessionFactory, get_scheduler_jobstore_url
 from data.polymarket_client import PolymarketClient
-from models.models import BotRuntimeState, CopiedTrade, MarketInfo, Position, TradeStatus
+from models.models import BotRuntimeState, CopiedTrade, MarketInfo, Position, TradeStatus, WalletScore
 from utils.notifications import NotificationService
 
 _ORCHESTRATOR_INSTANCE: "BackgroundOrchestrator | None" = None
@@ -804,6 +804,9 @@ class BackgroundOrchestrator:
     async def get_status(self) -> dict:
         await self._refresh_portfolio_state_from_db()
 
+        # Seed wallet scoring stats from WalletScore table
+        seed_wallets_stats = await self._get_seed_wallets_stats()
+
         jobs = []
         for job in self.scheduler.get_jobs():
             jobs.append(
@@ -908,7 +911,35 @@ class BackgroundOrchestrator:
             ),
             "risk_params": risk_params,
             "jobs": jobs,
+            "seed_wallets": seed_wallets_stats,
         }
+
+    async def _get_seed_wallets_stats(self) -> dict:
+        """Query WalletScore table for seed wallet scoring stats."""
+        try:
+            async with AsyncSessionFactory() as session:
+                rows = (await session.execute(select(WalletScore))).scalars().all()
+                total = len(rows)
+                qualified = sum(1 for r in rows if r.qualified)
+                rejected = total - qualified
+                # Collect rejection reasons
+                reasons: dict[str, int] = {}
+                for r in rows:
+                    if not r.qualified and r.reason:
+                        reasons[r.reason] = reasons.get(r.reason, 0) + 1
+                # Top 5 reasons sorted by count
+                top_reasons = dict(
+                    sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:5]
+                )
+                return {
+                    "total": total,
+                    "qualified": qualified,
+                    "rejected": rejected,
+                    "reject_reasons": top_reasons,
+                }
+        except Exception:
+            logger.exception("Failed to get seed wallet stats")
+            return {"total": 0, "qualified": 0, "rejected": 0, "reject_reasons": {}}
 
     async def get_pnl_status(self) -> dict:
         await self._refresh_portfolio_state_from_db()

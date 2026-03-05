@@ -43,6 +43,12 @@ export interface BotStatus {
   discovery_passed_filters: number;
   discovery_filter_stats: Record<string, number>;
   last_discovery_stats?: DiscoveryStats;
+  seed_wallets?: {
+    total: number;
+    qualified: number;
+    rejected: number;
+    reject_reasons: Record<string, number>;
+  };
   account_balances?: {
     source: string;
     free_balance_usd: number | null;
