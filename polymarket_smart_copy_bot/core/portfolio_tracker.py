@@ -321,12 +321,24 @@ class PortfolioTracker:
         # Prevent stale 24h reference snapshots from previous mode from skewing daily PnL.
         await session.execute(delete(PortfolioSnapshot))
 
+    # Positions with current market value below this threshold (USD) are
+    # considered "dust" and excluded from the dashboard open_positions count.
+    # Financial calculations (exposure, PnL) still include them for accuracy.
+    DUST_VALUE_THRESHOLD_USD = 0.05
+
     async def calculate_state(self, session: AsyncSession, risk_mode: RiskMode) -> PortfolioState:
         open_positions_query = select(Position).where(Position.is_open.is_(True))
         positions = (await session.execute(open_positions_query)).scalars().all()
 
         exposure = sum(position.invested_usd for position in positions)
         unrealized = sum(position.unrealized_pnl_usd for position in positions)
+
+        # Count only meaningful positions for the dashboard counter.
+        # Dust positions (tiny leftover shares) still contribute to financials.
+        meaningful = sum(
+            1 for p in positions
+            if (p.quantity * p.current_price_cents / 100) >= self.DUST_VALUE_THRESHOLD_USD
+        )
 
         # Sum realized PnL from ALL positions (open AND closed) so that profits
         # from closed trades are never lost from the equity calculation.
@@ -365,7 +377,7 @@ class PortfolioTracker:
             exposure_usd=round(exposure, 4),
             daily_pnl_usd=round(daily_pnl, 4),
             cumulative_pnl_usd=round(cumulative_pnl, 4),
-            open_positions=len(positions),
+            open_positions=meaningful,
             daily_drawdown_pct=round(daily_drawdown_pct, 6),
         )
 

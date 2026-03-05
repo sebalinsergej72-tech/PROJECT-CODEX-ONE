@@ -484,7 +484,12 @@ class PolymarketClient:
         positions_value: float | None = None
         positions_count = 0
         if open_positions is not None:
-            positions_count = len([row for row in open_positions if row.quantity > 0])
+            # Count only meaningful positions (current value >= $0.05) to
+            # match what Polymarket UI shows and exclude dust.
+            positions_count = len([
+                row for row in open_positions
+                if row.quantity > 0 and row.current_value_usd >= 0.05
+            ])
             positions_value = round(
                 sum(max(float(row.current_value_usd), 0.0) for row in open_positions),
                 4,

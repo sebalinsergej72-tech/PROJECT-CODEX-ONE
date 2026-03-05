@@ -1016,11 +1016,21 @@ class BackgroundOrchestrator:
         if open_only:
             query = query.where(Position.is_open.is_(True))
             # Exclude phantom/empty positions that have no real quantity or investment.
-            # These are typically dry-run positions or accounting artefacts that slipped
-            # through before the account-sync cleanup could run.
             query = query.where(Position.quantity > 0, Position.invested_usd > 0)
 
         rows = (await session.execute(query)).scalars().all()
+
+        # When listing open positions, filter out dust (tiny leftover shares
+        # worth less than the display threshold).  Keeps the dashboard clean
+        # and aligned with what Polymarket UI shows.
+        from core.portfolio_tracker import PortfolioTracker
+        dust_threshold = PortfolioTracker.DUST_VALUE_THRESHOLD_USD
+        if open_only:
+            rows = [
+                r for r in rows
+                if (r.quantity * r.current_price_cents / 100) >= dust_threshold
+            ]
+
         result = [
             {
                 "id": row.id,
