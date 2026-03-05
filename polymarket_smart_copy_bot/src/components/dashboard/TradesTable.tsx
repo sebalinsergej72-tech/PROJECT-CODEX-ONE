@@ -90,8 +90,23 @@ export function TradesTable({ trades, status, isLoading }: Props) {
 
             {!isLoading
               ? filtered.map((t, i) => {
+                // Map internal statuses to display labels and colors
+                const statusLabel =
+                  t.status === "filled" || t.status === "executed"
+                    ? "EXECUTED"
+                    : t.status === "submitted" || t.status === "partial"
+                      ? "AWAITING"
+                      : (t.status || "-").toUpperCase();
                 const statusColor =
-                  t.status === "executed" ? "text-profit" : t.status === "failed" ? "text-loss" : "text-muted-foreground";
+                  t.status === "filled" || t.status === "executed"
+                    ? "text-profit"
+                    : t.status === "submitted" || t.status === "partial"
+                      ? "text-warning"
+                      : t.status === "failed"
+                        ? "text-loss"
+                        : t.status === "canceled" || t.status === "expired"
+                          ? "text-warning"
+                          : "text-muted-foreground";
                 return (
                   <tr key={`${t.copied_at}-${t.market_id}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
                     <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
@@ -99,7 +114,7 @@ export function TradesTable({ trades, status, isLoading }: Props) {
                     </td>
                     <td className={`py-2 pr-3 font-mono text-xs font-bold uppercase ${statusColor}`}>
                       <div className="flex items-center gap-1.5">
-                        {t.status || "-"}
+                        {statusLabel}
                         {(t.status === "skipped" || t.status === "failed") && t.reason && (
                           <TooltipProvider>
                             <Tooltip>
