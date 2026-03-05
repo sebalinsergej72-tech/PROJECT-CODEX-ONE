@@ -362,37 +362,54 @@ class PolymarketClient:
     async def fetch_market_info(self, market_id: str) -> MarketInfoData:
         """Fetch human-readable market question and category from the Gamma API.
 
-        Tries ``/markets/{market_id}`` then ``/events/{market_id}``.
-        Returns empty strings on any API failure so the caller can
-        fall back to displaying the raw ``market_id``.
+        The Gamma API may return either a single dict or a list of market dicts
+        depending on the endpoint and conditionId format.  We handle both.
+
+        Tries multiple URL patterns:
+          1. GET /markets?conditionIds={market_id}  (returns list, most reliable)
+          2. GET /markets/{market_id}               (may return list or dict)
+          3. GET /events/{market_id}                (fallback)
+        Returns empty strings on any API failure so callers show raw market_id.
         """
 
         question = ""
         category = ""
 
-        candidate_urls = [
-            f"{settings.polymarket_gamma_host.rstrip('/')}/markets/{market_id}",
-            f"{settings.polymarket_gamma_host.rstrip('/')}/events/{market_id}",
+        gamma = settings.polymarket_gamma_host.rstrip("/")
+        candidate_requests: list[tuple[str, dict]] = [
+            # Most reliable: conditionIds query parameter returns a list
+            (f"{gamma}/markets", {"conditionIds": market_id}),
+            # Path-based endpoints (response may be dict or list)
+            (f"{gamma}/markets/{market_id}", {}),
+            (f"{gamma}/events/{market_id}", {}),
         ]
 
-        for url in candidate_urls:
+        for url, params in candidate_requests:
             try:
-                raw = await self._request_json("GET", url)
+                raw = await self._request_json("GET", url, params=params or None)
             except Exception:
                 continue
 
-            if not isinstance(raw, dict):
+            # Normalise: Gamma may return a list or a single dict
+            market_obj: dict | None = None
+            if isinstance(raw, dict):
+                market_obj = raw
+            elif isinstance(raw, list):
+                # Take first item that looks like a market
+                market_obj = next((item for item in raw if isinstance(item, dict)), None)
+
+            if market_obj is None:
                 continue
 
             question = str(
-                raw.get("question")
-                or raw.get("title")
-                or raw.get("groupItemTitle")
+                market_obj.get("question")
+                or market_obj.get("title")
+                or market_obj.get("groupItemTitle")
                 or ""
             )
-            tags = raw.get("tags")
+            tags = market_obj.get("tags")
             category = str(
-                raw.get("category")
+                market_obj.get("category")
                 or (tags[0] if isinstance(tags, list) and tags else "")
             )
 

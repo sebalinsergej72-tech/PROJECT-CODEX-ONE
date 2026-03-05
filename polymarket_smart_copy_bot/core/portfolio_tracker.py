@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -74,11 +75,29 @@ class PortfolioTracker:
         synced_new = 0
         dedup_closed = 0
         price_fallback_applied = 0
-        for key, remote_pos in remote_by_key.items():
-            fallback_used = await self._apply_price_fallback_if_needed(remote_pos)
-            if fallback_used:
-                price_fallback_applied += 1
 
+        # Run all price fallback calls concurrently (was sequential, blocking scheduler)
+        positions_needing_fallback = [
+            rp for rp in remote_by_key.values()
+            if rp.quantity > 0 and rp.invested_usd > 0
+            and (rp.current_price_cents <= 0.0001 or rp.current_value_usd <= 0.0001)
+        ]
+        if positions_needing_fallback:
+            sem = asyncio.Semaphore(5)
+
+            async def _do_fallback(pos: WalletOpenPosition) -> bool:
+                async with sem:
+                    return await self._apply_price_fallback_if_needed(pos)
+
+            fallback_results = await asyncio.gather(
+                *[_do_fallback(pos) for pos in positions_needing_fallback],
+                return_exceptions=True,
+            )
+            price_fallback_applied = sum(
+                1 for r in fallback_results if r is True
+            )
+
+        for key, remote_pos in remote_by_key.items():
             matched_rows = local_by_key.get(key, [])
             if not matched_rows:
                 session.add(self._build_account_sync_position(remote_pos, now=now))
@@ -211,7 +230,12 @@ class PortfolioTracker:
         # invested_usd / unrealized_pnl_usd.  Stale realized_pnl values
         # from previous local netting would otherwise double-count PnL.
         row.realized_pnl_usd = 0.0
-        row.wallet_address = cls.ACCOUNT_SYNC_WALLET
+        # Preserve the original wallet_address when it belongs to a real
+        # copied-from wallet.  Overwriting it with ``account_sync`` would
+        # prevent mirror-close reconciliation from detecting that the source
+        # wallet closed a position (reconciliation ignores account_sync rows).
+        if row.wallet_address in (cls.ACCOUNT_SYNC_WALLET, "unknown", ""):
+            row.wallet_address = cls.ACCOUNT_SYNC_WALLET
         row.is_open = True
         row.closed_at = None
         row.updated_at = now

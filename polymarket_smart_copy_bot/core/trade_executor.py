@@ -494,6 +494,12 @@ class TradeExecutor:
         if intent.token_id and position.token_id != intent.token_id:
             position.token_id = intent.token_id
 
+        # Assign the real source wallet so mirror-close reconciliation can track
+        # this position.  Without this, positions created by account_sync first
+        # would never be matched for mirror-close.
+        if position.wallet_address in (PortfolioTracker.ACCOUNT_SYNC_WALLET, "unknown", ""):
+            position.wallet_address = intent.wallet_address
+
         if position.side == side:
             new_invested = position.invested_usd + executed_size_usd
             new_quantity = position.quantity + quantity_delta
