@@ -384,6 +384,8 @@ class PolymarketClient:
             (f"{gamma}/events/{market_id}", {}),
         ]
 
+        target_id = market_id.strip().lower()
+
         for url, params in candidate_requests:
             try:
                 raw = await self._request_json("GET", url, params=params or None)
@@ -395,8 +397,27 @@ class PolymarketClient:
             if isinstance(raw, dict):
                 market_obj = raw
             elif isinstance(raw, list):
-                # Take first item that looks like a market
-                market_obj = next((item for item in raw if isinstance(item, dict)), None)
+                dict_items = [item for item in raw if isinstance(item, dict)]
+                # First priority: exact match on conditionId / id field so that
+                # a generic /markets list doesn't return a mismatched market.
+                market_obj = next(
+                    (
+                        item for item in dict_items
+                        if str(
+                            item.get("conditionId")
+                            or item.get("condition_id")
+                            or item.get("id")
+                            or ""
+                        ).strip().lower() == target_id
+                    ),
+                    None,
+                )
+                # If no ID match but the API returned exactly one result, trust it
+                # (the endpoint likely filtered correctly by our query parameter).
+                if market_obj is None and len(dict_items) == 1:
+                    market_obj = dict_items[0]
+                # Multiple items with no ID match → the API ignored our filter;
+                # skip this URL and try the next candidate instead.
 
             if market_obj is None:
                 continue
