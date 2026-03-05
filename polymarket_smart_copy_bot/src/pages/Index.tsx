@@ -5,12 +5,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ControlPanel } from "@/components/dashboard/ControlPanel";
 import { DiscoveryDiag } from "@/components/dashboard/DiscoveryDiag";
 import { MetricsGrid } from "@/components/dashboard/MetricsGrid";
+import { OpenOrdersTable } from "@/components/dashboard/OpenOrdersTable";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { StatusBanner } from "@/components/dashboard/StatusBanner";
 import { TradesTable } from "@/components/dashboard/TradesTable";
 import { YieldChart } from "@/components/dashboard/YieldChart";
 import { LeaderboardTable } from "@/components/dashboard/LeaderboardTable";
-import { useBotPositions, useBotStatus, useBotTrades } from "@/hooks/useBotData";
+import { useBotOpenOrders, useBotPositions, useBotStatus, useBotTrades } from "@/hooks/useBotData";
 
 const Index = () => {
   const qc = useQueryClient();
@@ -22,6 +23,7 @@ const Index = () => {
   } = useBotStatus();
   const { data: trades, isLoading: tradesLoading } = useBotTrades();
   const { data: positions, isLoading: positionsLoading } = useBotPositions();
+  const { data: openOrders, isLoading: openOrdersLoading } = useBotOpenOrders();
   const lastUpdate = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : "—";
 
   return (
@@ -61,6 +63,7 @@ const Index = () => {
             <TradesTable trades={trades} status={status} isLoading={tradesLoading} />
             <PositionsTable positions={positions} isLoading={positionsLoading} />
           </div>
+          <OpenOrdersTable orders={openOrders} isLoading={openOrdersLoading} />
         </div>
       </div>
     </div>

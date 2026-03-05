@@ -16,6 +16,7 @@ class DummyOrchestrator:
         self._boost = True
         self._price_filter = False
         self._autoadd = False
+        self._cleanup_runs = 0
 
     async def set_trading_enabled(self, enabled: bool) -> dict:
         self._enabled = enabled
@@ -44,6 +45,19 @@ class DummyOrchestrator:
         self._dry_run = enabled
         return {"dry_run": self._dry_run}
 
+    async def run_stale_order_cleanup_now(self) -> dict:
+        self._cleanup_runs += 1
+        return {
+            "ok": True,
+            "last_stale_order_cleanup_at": "2026-03-06T00:00:00+00:00",
+            "cleanup": {
+                "ok": True,
+                "cancelled": 1,
+                "sync_status": "canceled",
+                "tracked_order_ids": 1,
+            },
+        }
+
 
 def test_dashboard_page_renders() -> None:
     app = FastAPI()
@@ -53,8 +67,10 @@ def test_dashboard_page_renders() -> None:
         response = client.get("/dashboard")
 
     assert response.status_code == 200
+    # Dashboard is served as a built SPA entrypoint (bundle mounted under
+    # /dashboard-static), so we validate shell markers instead of button text.
     assert "id=\"root\"" in response.text
-    assert "telegram-web-app.js" in response.text
+    assert "/dashboard-static/assets/" in response.text
 
 
 def test_control_trading_toggles() -> None:
@@ -132,3 +148,18 @@ def test_control_engine_switch() -> None:
     assert paper.status_code == 200
     assert paper.json()["dry_run"] is True
     assert paper.json()["engine"] == "paper"
+
+
+def test_control_cleanup_endpoint() -> None:
+    app = FastAPI()
+    app.include_router(control_router)
+    app.state.orchestrator = DummyOrchestrator()
+
+    with TestClient(app) as client:
+        response = client.post("/control/orders/cleanup")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["ok"] is True
+    assert payload["cleanup"]["sync_status"] == "canceled"

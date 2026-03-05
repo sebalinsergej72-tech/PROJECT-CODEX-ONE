@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     disable_price_filter: bool = Field(default=True, alias="DISABLE_PRICE_FILTER")
     auto_reinvest: bool = Field(default=True, alias="AUTO_REINVEST")
     high_conviction_multiplier: float = Field(default=1.5, alias="HIGH_CONVICTION_MULTIPLIER")
+    # SAFETY: safe aggressive fill
+    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")
+    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
+    aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")
 
     wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")
     discovery_autoadd_default: bool = Field(default=True, alias="DISCOVERY_AUTOADD")

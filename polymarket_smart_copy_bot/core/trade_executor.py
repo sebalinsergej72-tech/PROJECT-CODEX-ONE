@@ -27,6 +27,24 @@ class MarketPostCheckResult:
     trim_error: str | None = None
 
 
+@dataclass(slots=True)
+class FillReconcileResult:
+    status: TradeStatus
+    newly_filled_usd: float = 0.0
+    newly_filled_quantity: float = 0.0
+    fill_price_cents: float = 0.0
+    order_open: bool | None = None
+    latest_fill_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class ExecutionPlan:
+    order_request: OrderRequest
+    requested_price_cents: float
+    requested_slippage_bps: float
+    order_type: str
+
+
 class TradeExecutor:
     """Executes approved copy-trades and persists trade/position state."""
 
@@ -189,65 +207,19 @@ class TradeExecutor:
         # Persist the bot-calculated intended size even if execution later fails.
         copied_trade.size_usd = target_size_usd
 
-        # SAFETY: IOC + controlled slippage — determine order type and execution price
-        is_aggressive_fill = fill_mode == "aggressive" and not is_mirror_close
-        order_type = "GTC"  # default conservative
-        execution_price_cents = intent.source_price_cents
-        now = datetime.now(tz=timezone.utc)
-
-        if is_aggressive_fill:
-            # Calculate execution price with slippage tolerance
-            slippage_factor = 1 + (settings.max_slippage_bps / 10_000)
-            if intent.side.lower() == "buy":
-                execution_price_cents = intent.source_price_cents * slippage_factor
-            else:
-                execution_price_cents = intent.source_price_cents / slippage_factor
-
-            # SAFETY: verify slippage is within hard limit before placing
-            slippage_ok, slippage_bps = self.risk_manager.can_accept_slippage(
-                source_price_cents=intent.source_price_cents,
-                execution_price_cents=execution_price_cents,
-                max_allowed_bps=settings.max_allowed_slippage_bps,
-            )
-            if not slippage_ok:
-                copied_trade.status = TradeStatus.SKIPPED.value
-                copied_trade.reason = f"slippage_exceeded ({slippage_bps:.1f} bps > {settings.max_allowed_slippage_bps} bps)"
-                logger.warning(
-                    "Trade {} skipped: slippage {:.1f} bps exceeds hard limit {:.1f} bps",
-                    intent.external_trade_id,
-                    slippage_bps,
-                    settings.max_allowed_slippage_bps,
-                )
-                return
-
-            # IMPROVED: flexible fill mode — IOC (default) or FOK
-            order_type = settings.aggressive_fill_type.upper()  # "IOC" or "FOK"
-            logger.info(
-                "Aggressive fill [{}]: {} {} price={:.2f}c exec_price={:.2f}c slippage={:.1f}bps",
-                order_type,
-                intent.market_id,
-                intent.side.upper(),
-                intent.source_price_cents,
-                execution_price_cents,
-                slippage_bps,
-            )
-
-        # IMPROVED: flexible fill mode — record fill mode and TTL
-        copied_trade.fill_mode = fill_mode
-        copied_trade.submitted_at = now
-        if is_aggressive_fill:
-            copied_trade.ttl_expires_at = now + timedelta(seconds=settings.aggressive_fill_ttl_seconds)
+        execution_plan = self._build_execution_plan(
+            intent=intent,
+            target_size_usd=target_size_usd,
+            risk_mode=risk_mode,
+        )
+        if execution_plan is None:
+            copied_trade.status = TradeStatus.SKIPPED.value
+            copied_trade.reason = "slippage_above_hard_limit"
+            logger.warning("Trade {} skipped: slippage_above_hard_limit", intent.external_trade_id)
+            return
 
         result = await self.polymarket_client.place_order(
-            OrderRequest(
-                token_id=intent.token_id or "",
-                side=intent.side,
-                price_cents=execution_price_cents,
-                size_usd=target_size_usd,
-                market_id=intent.market_id,
-                outcome=intent.outcome,
-                order_type=order_type,
-            )
+            execution_plan.order_request
         )
 
         if not result.success:
@@ -274,39 +246,199 @@ class TradeExecutor:
             )
             return
 
-        # IMPROVED: flexible fill mode — store order_id
+        copied_trade.status = TradeStatus.SUBMITTED.value
         copied_trade.order_id = result.order_id
         copied_trade.tx_hash = result.tx_hash
-
-        # SAFETY: IOC + controlled slippage — all order types go to SUBMITTED
-        # IOC orders may partially fill, so we always defer to fill monitor for confirmation.
-        # FOK is kept as fallback: if used, the fill monitor will confirm instantly.
-        copied_trade.status = TradeStatus.SUBMITTED.value
+        copied_trade.submitted_at = datetime.now(tz=timezone.utc)
         if is_mirror_close:
             copied_trade.reason = (
-                f"submitted_{order_type.lower()} mirror_close mode={risk_mode}"
+                f"submitted mirror_close mode={risk_mode} type={execution_plan.order_type} "
+                f"limit={execution_plan.requested_price_cents:.2f}c slip={execution_plan.requested_slippage_bps:.2f}bps"
             )
         else:
             copied_trade.reason = (
-                f"submitted_{order_type.lower()} mode={risk_mode} mult={wallet_multiplier:.2f} kelly={kelly_fraction:.3f}"
+                f"submitted mode={risk_mode} type={execution_plan.order_type} "
+                f"limit={execution_plan.requested_price_cents:.2f}c slip={execution_plan.requested_slippage_bps:.2f}bps "
+                f"mult={wallet_multiplier:.2f} kelly={kelly_fraction:.3f}"
             )
 
-        logger.info(
-            "Order submitted ({}, awaiting fill) | {} {} ${:.2f} order_id={}",
-            order_type,
-            intent.market_id,
-            intent.side.upper(),
-            target_size_usd,
-            result.order_id,
+        if self.polymarket_client.is_dry_run():
+            reconcile_result = await self._apply_dry_run_fill(
+                session=session,
+                copied_trade=copied_trade,
+                intent=intent,
+                target_size_usd=target_size_usd,
+            )
+        else:
+            reconcile_result = await self._reconcile_trade_fill_state(
+                session=session,
+                copied_trade=copied_trade,
+                intent=intent,
+            )
+
+        if reconcile_result.newly_filled_usd > 0:
+            post_check = await self._post_check_market_position_cap(
+                session=session,
+                intent=intent,
+                executed_size_usd=reconcile_result.newly_filled_usd,
+                portfolio_state=portfolio_state,
+                risk_mode=risk_mode,
+            )
+            if post_check.exceeded:
+                overflow_note = (
+                    f"postcheck_exceeded market={intent.market_id} "
+                    f"exposure=${post_check.market_exposure_usd:.2f} cap=${post_check.market_cap_usd:.2f} "
+                    f"overflow=${post_check.overflow_usd:.2f} trimmed=${post_check.trimmed_usd:.2f}"
+                )
+                if post_check.trim_error:
+                    overflow_note = f"{overflow_note} trim_error={post_check.trim_error}"
+                copied_trade.reason = f"{copied_trade.reason} | {overflow_note}"
+                logger.error("{}", overflow_note)
+                await self.notifications.send_message(f"[RISK] {overflow_note}")
+            await self._refresh_live_capital_base(session)
+
+        if copied_trade.status == TradeStatus.SUBMITTED.value:
+            await self.notifications.send_message(
+                f"[SUBMITTED:{risk_mode}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
+                f"${target_size_usd:.2f}"
+            )
+            return
+
+        if copied_trade.status in {TradeStatus.PARTIAL.value, TradeStatus.FILLED.value}:
+            actual_slippage_bps = self.risk_manager.compute_slippage_bps(
+                source_price_cents=intent.source_price_cents,
+                execution_price_cents=max(copied_trade.filled_price_cents, 0.0),
+                side=intent.side.lower(),
+            )
+            logger.info(
+                "Filled at {:.2f}c (slippage {:+.2f} bps) trade={} status={}",
+                copied_trade.filled_price_cents,
+                actual_slippage_bps,
+                copied_trade.external_trade_id,
+                copied_trade.status,
+            )
+            await self.notifications.send_message(
+                f"[{copied_trade.status.upper()}:{risk_mode}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
+                f"${copied_trade.filled_size_usd:.2f} @ {copied_trade.filled_price_cents:.2f}c "
+                f"(slippage {actual_slippage_bps:+.2f}bps)"
+            )
+            return
+
+    async def reconcile_open_trade_states(self, session: AsyncSession) -> None:
+        """Reconcile submitted/partial live trades against authoritative CLOB fills."""
+
+        if self.polymarket_client.is_dry_run():
+            return
+
+        query = (
+            select(CopiedTrade)
+            .where(CopiedTrade.status.in_([TradeStatus.SUBMITTED.value, TradeStatus.PARTIAL.value]))
+            .order_by(CopiedTrade.copied_at.asc())
         )
+        rows = (await session.execute(query)).scalars().all()
+        for copied_trade in rows:
+            intent = self._intent_from_copied_trade(copied_trade)
+            if intent is None:
+                continue
+            await self._reconcile_trade_fill_state(
+                session=session,
+                copied_trade=copied_trade,
+                intent=intent,
+            )
 
-        # NOTE: position upsert deferred to order fill monitor background job
-        # This ensures we only create positions for confirmed fills (full or partial)
+    async def mark_canceled_orders(
+        self,
+        session: AsyncSession,
+        *,
+        order_ids: list[str],
+        expired: bool = False,
+    ) -> int:
+        """Sync stale cleanup results back into copied trade status rows."""
 
-        status_label = "SUBMITTED"
-        await self.notifications.send_message(
-            f"[{status_label}:{risk_mode}:{fill_mode}:{order_type}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
-            f"${target_size_usd:.2f} (mult={wallet_multiplier:.2f}, kelly={kelly_fraction:.3f})"
+        normalized_ids = [order_id.strip() for order_id in order_ids if order_id and order_id.strip()]
+        if not normalized_ids:
+            return 0
+
+        query = select(CopiedTrade).where(CopiedTrade.order_id.in_(normalized_ids))
+        rows = (await session.execute(query)).scalars().all()
+        now = datetime.now(tz=timezone.utc)
+        changed = 0
+        next_status = TradeStatus.EXPIRED.value if expired else TradeStatus.CANCELED.value
+        for row in rows:
+            if row.status in {TradeStatus.FILLED.value, TradeStatus.FAILED.value, TradeStatus.SKIPPED.value}:
+                continue
+            row.status = next_status
+            row.canceled_at = now
+            row.reason = f"{next_status}_by_cleanup"
+            changed += 1
+        return changed
+
+    async def _refresh_live_capital_base(self, session: AsyncSession) -> None:
+        """Refresh runtime capital base immediately after successful LIVE fills."""
+
+        if self.polymarket_client.is_dry_run():
+            return
+        live_balance = await self.polymarket_client.fetch_account_balance_usd()
+        if live_balance is None or live_balance < 0:
+            return
+        await self.portfolio_tracker.update_capital_base(session, live_balance)
+
+    def _build_execution_plan(
+        self,
+        *,
+        intent: TradeIntent,
+        target_size_usd: float,
+        risk_mode: RiskMode,
+    ) -> ExecutionPlan | None:
+        requested_price_cents = round(float(intent.source_price_cents), 4)
+        requested_slippage_bps = 0.0
+        order_type = "GTC"
+
+        if risk_mode == "aggressive":
+            requested_slippage_bps = max(float(settings.max_slippage_bps), 0.0)
+            side = intent.side.lower()
+            if side == TradeSide.BUY.value:
+                requested_price_cents = round(
+                    float(intent.source_price_cents) * (1.0 + (requested_slippage_bps / 10_000.0)),
+                    4,
+                )
+            else:
+                requested_price_cents = round(
+                    float(intent.source_price_cents) * (1.0 - (requested_slippage_bps / 10_000.0)),
+                    4,
+                )
+            allowed, actual_bps = self.risk_manager.can_accept_slippage(
+                source_price_cents=float(intent.source_price_cents),
+                execution_price_cents=requested_price_cents,
+                side=side,
+                risk_mode=risk_mode,
+            )
+            if not allowed:
+                logger.warning(
+                    "Trade {} rejected by slippage guard: source={:.2f}c execution={:.2f}c bps={:.2f}",
+                    intent.external_trade_id,
+                    intent.source_price_cents,
+                    requested_price_cents,
+                    actual_bps,
+                )
+                return None
+            requested_slippage_bps = round(actual_bps, 4)
+            # SAFETY: safe aggressive fill via immediate-or-cancel semantics.
+            order_type = "FAK"
+
+        return ExecutionPlan(
+            order_request=OrderRequest(
+                token_id=intent.token_id or "",
+                side=intent.side,
+                price_cents=requested_price_cents,
+                size_usd=target_size_usd,
+                market_id=intent.market_id,
+                outcome=intent.outcome,
+                order_type=order_type,
+            ),
+            requested_price_cents=requested_price_cents,
+            requested_slippage_bps=requested_slippage_bps,
+            order_type=order_type,
         )
 
     async def _apply_market_position_precheck(
@@ -322,8 +454,24 @@ class TradeExecutor:
 
         market_cap = self._market_position_cap_usd(portfolio_state=portfolio_state, risk_mode=risk_mode)
         current_market_exposure = await self._market_open_exposure_usd(session, market_id)
-        remaining_capacity = max(market_cap - current_market_exposure, 0.0)
+        pending_market_exposure = await self._market_pending_order_exposure_usd(session, market_id)
+        remaining_capacity = max(market_cap - current_market_exposure - pending_market_exposure, 0.0)
         return round(min(requested_size_usd, remaining_capacity), 2)
+
+    @staticmethod
+    async def _market_pending_order_exposure_usd(session: AsyncSession, market_id: str) -> float:
+        """Reserve market cap for bot-submitted orders that have not fully filled yet."""
+
+        query = select(CopiedTrade).where(
+            CopiedTrade.market_id == market_id,
+            CopiedTrade.status.in_([TradeStatus.SUBMITTED.value, TradeStatus.PARTIAL.value]),
+        )
+        rows = (await session.execute(query)).scalars().all()
+        pending_usd = 0.0
+        for row in rows:
+            remaining = max(float(row.size_usd or 0.0) - float(row.filled_size_usd or 0.0), 0.0)
+            pending_usd += remaining
+        return round(pending_usd, 4)
 
     async def _post_check_market_position_cap(
         self,
@@ -509,6 +657,158 @@ class TradeExecutor:
         if requested <= 0:
             requested = full_close_notional
         return round(min(full_close_notional, requested), 2)
+
+    async def _apply_dry_run_fill(
+        self,
+        *,
+        session: AsyncSession,
+        copied_trade: CopiedTrade,
+        intent: TradeIntent,
+        target_size_usd: float,
+    ) -> FillReconcileResult:
+        """DRY_RUN still simulates immediate fills, but uses the new status model."""
+
+        fill_quantity = target_size_usd / max(intent.source_price_cents / 100.0, 0.01)
+        copied_trade.status = TradeStatus.FILLED.value
+        copied_trade.filled_at = datetime.now(tz=timezone.utc)
+        copied_trade.filled_quantity = round(fill_quantity, 8)
+        copied_trade.filled_size_usd = round(target_size_usd, 4)
+        copied_trade.filled_price_cents = round(intent.source_price_cents, 4)
+        copied_trade.reason = f"filled dry_run @ {intent.source_price_cents:.2f}c"
+        await self._upsert_position(session, intent, target_size_usd)
+        return FillReconcileResult(
+            status=TradeStatus.FILLED,
+            newly_filled_usd=round(target_size_usd, 4),
+            newly_filled_quantity=round(fill_quantity, 8),
+            fill_price_cents=round(intent.source_price_cents, 4),
+            order_open=False,
+            latest_fill_at=copied_trade.filled_at,
+        )
+
+    async def _reconcile_trade_fill_state(
+        self,
+        *,
+        session: AsyncSession,
+        copied_trade: CopiedTrade,
+        intent: TradeIntent,
+    ) -> FillReconcileResult:
+        """SAFETY: confirm live order state from authoritative Polymarket fills."""
+
+        after_ts = copied_trade.submitted_at or copied_trade.copied_at or datetime.now(tz=timezone.utc)
+        fills = await self.polymarket_client.fetch_account_fills(
+            after_ts=after_ts,
+            market_id=copied_trade.market_id,
+            token_id=copied_trade.token_id,
+            side=copied_trade.side,
+            order_id=copied_trade.order_id,
+            limit=100,
+        )
+
+        total_quantity = 0.0
+        total_size_usd = 0.0
+        latest_fill_at: datetime | None = None
+        if fills:
+            for fill in fills:
+                total_quantity += max(fill.size_shares, 0.0)
+                total_size_usd += max(fill.size_usd, 0.0)
+                if latest_fill_at is None or fill.traded_at > latest_fill_at:
+                    latest_fill_at = fill.traded_at
+
+        delta_quantity = max(total_quantity - float(copied_trade.filled_quantity or 0.0), 0.0)
+        delta_size_usd = max(total_size_usd - float(copied_trade.filled_size_usd or 0.0), 0.0)
+        delta_price_cents = 0.0
+        if delta_quantity > 0 and delta_size_usd > 0:
+            delta_price_cents = round((delta_size_usd / delta_quantity) * 100.0, 4)
+
+        if delta_quantity > 0 and delta_size_usd > 0:
+            fill_intent = self._intent_with_fill(intent, price_cents=delta_price_cents, size_usd=delta_size_usd)
+            await self._upsert_position(session, fill_intent, delta_size_usd)
+
+        order_open = None
+        if copied_trade.order_id:
+            order_open = await self.polymarket_client.is_order_open(copied_trade.order_id)
+
+        copied_trade.filled_quantity = round(total_quantity, 8)
+        copied_trade.filled_size_usd = round(total_size_usd, 4)
+        copied_trade.filled_price_cents = round((total_size_usd / total_quantity) * 100.0, 4) if total_quantity > 0 else 0.0
+        copied_trade.filled_at = latest_fill_at
+
+        size_tolerance = max(min(copied_trade.size_usd * 0.01, 0.1), 0.01)
+        fully_filled = total_size_usd + size_tolerance >= copied_trade.size_usd
+
+        if total_size_usd <= 0:
+            if order_open is False:
+                copied_trade.status = TradeStatus.CANCELED.value
+                copied_trade.canceled_at = datetime.now(tz=timezone.utc)
+                copied_trade.reason = "canceled_without_fill"
+                return FillReconcileResult(status=TradeStatus.CANCELED, order_open=order_open)
+            copied_trade.status = TradeStatus.SUBMITTED.value
+            copied_trade.reason = copied_trade.reason or "submitted_waiting_fill"
+            return FillReconcileResult(status=TradeStatus.SUBMITTED, order_open=order_open)
+
+        if fully_filled:
+            copied_trade.status = TradeStatus.FILLED.value
+            copied_trade.reason = f"filled @ {copied_trade.filled_price_cents:.2f}c"
+            return FillReconcileResult(
+                status=TradeStatus.FILLED,
+                newly_filled_usd=round(delta_size_usd, 4),
+                newly_filled_quantity=round(delta_quantity, 8),
+                fill_price_cents=delta_price_cents or copied_trade.filled_price_cents,
+                order_open=order_open,
+                latest_fill_at=latest_fill_at,
+            )
+
+        copied_trade.status = TradeStatus.PARTIAL.value
+        copied_trade.reason = f"partial_fill ${copied_trade.filled_size_usd:.2f} @ {copied_trade.filled_price_cents:.2f}c"
+        if order_open is False:
+            copied_trade.canceled_at = datetime.now(tz=timezone.utc)
+            copied_trade.reason = f"{copied_trade.reason} | remainder_canceled"
+        return FillReconcileResult(
+            status=TradeStatus.PARTIAL,
+            newly_filled_usd=round(delta_size_usd, 4),
+            newly_filled_quantity=round(delta_quantity, 8),
+            fill_price_cents=delta_price_cents or copied_trade.filled_price_cents,
+            order_open=order_open,
+            latest_fill_at=latest_fill_at,
+        )
+
+    @staticmethod
+    def _intent_from_copied_trade(copied_trade: CopiedTrade) -> TradeIntent | None:
+        if not copied_trade.token_id:
+            return None
+        return TradeIntent(
+            external_trade_id=copied_trade.external_trade_id,
+            wallet_address=copied_trade.wallet_address,
+            wallet_score=0.0,
+            wallet_win_rate=0.0,
+            wallet_profit_factor=0.0,
+            wallet_avg_position_size=0.0,
+            market_id=copied_trade.market_id,
+            token_id=copied_trade.token_id,
+            outcome=copied_trade.outcome,
+            side=copied_trade.side,
+            source_price_cents=copied_trade.price_cents,
+            source_size_usd=copied_trade.size_usd,
+            is_short_term=False,
+        )
+
+    @staticmethod
+    def _intent_with_fill(intent: TradeIntent, *, price_cents: float, size_usd: float) -> TradeIntent:
+        return TradeIntent(
+            external_trade_id=intent.external_trade_id,
+            wallet_address=intent.wallet_address,
+            wallet_score=intent.wallet_score,
+            wallet_win_rate=intent.wallet_win_rate,
+            wallet_profit_factor=intent.wallet_profit_factor,
+            wallet_avg_position_size=intent.wallet_avg_position_size,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            outcome=intent.outcome,
+            side=intent.side,
+            source_price_cents=price_cents,
+            source_size_usd=size_usd,
+            is_short_term=intent.is_short_term,
+        )
 
     @staticmethod
     async def _upsert_position(session: AsyncSession, intent: TradeIntent, executed_size_usd: float) -> None:

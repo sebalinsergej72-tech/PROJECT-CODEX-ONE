@@ -17,15 +17,16 @@ class Base(DeclarativeBase):
 
 # IMPROVED: status model — no longer marks as executed on submission
 class TradeStatus(str, Enum):
-    PENDING   = "pending"       # not yet sent
-    SUBMITTED = "submitted"     # order sent to CLOB, awaiting fill
-    PARTIAL   = "partial"       # partially filled
-    FILLED    = "filled"        # fully filled (confirmed via API)
-    CANCELED  = "canceled"      # cancelled by TTL or manually
-    EXPIRED   = "expired"       # TTL expired
-    EXECUTED  = "executed"      # legacy compat
-    SKIPPED   = "skipped"       # risk manager rejected
-    FAILED    = "failed"        # API error
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    PARTIAL = "partial"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+    # Legacy value preserved for historical rows.
+    EXECUTED = "executed"
+    SKIPPED = "skipped"
+    FAILED = "failed"
 
 
 class TradeSide(str, Enum):
@@ -81,18 +82,18 @@ class CopiedTrade(Base):
     size_usd: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[TradeStatus] = mapped_column(String(24), nullable=False, default=TradeStatus.PENDING.value)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_id: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
     tx_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    copied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
-
-    # IMPROVED: status model — order lifecycle tracking fields
-    order_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    fill_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)       # "conservative" / "aggressive"
-    filled_size_usd: Mapped[float | None] = mapped_column(Float, nullable=True)     # actual filled amount
-    filled_price_cents: Mapped[float | None] = mapped_column(Float, nullable=True)  # actual fill price
-    slippage_bps: Mapped[float | None] = mapped_column(Float, nullable=True)        # vs source price
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    canceled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    filled_quantity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    filled_size_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    filled_price_cents: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    copied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    fill_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    slippage_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
     ttl_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     approvals: Mapped[list[ManualApproval]] = relationship(back_populates="trade")

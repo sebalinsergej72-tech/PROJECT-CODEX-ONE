@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.open_orders import router as open_orders_router
 from api.positions import router as positions_router
 from api.trades import router as trades_router
 
@@ -19,7 +20,12 @@ class DummyOrchestrator:
                 "side": "buy",
                 "price_cents": 44.5,
                 "size_usd": 3.5,
-                "status": "executed",
+                "status": "filled",
+                "order_id": "ord-1",
+                "submitted_at": "2026-03-01T11:59:50+00:00",
+                "filled_at": "2026-03-01T12:00:01+00:00",
+                "filled_size_usd": 3.5,
+                "filled_price_cents": 44.5,
                 "copied_at": "2026-03-01T12:00:00+00:00",
             }
         ][:limit]
@@ -51,6 +57,23 @@ class DummyOrchestrator:
         if open_only:
             rows = [row for row in rows if row["is_open"]]
         return rows[:limit]
+
+    async def get_open_orders(self, *, limit: int = 100) -> list[dict]:
+        return [
+            {
+                "order_id": "ord-1",
+                "market_id": "m-1",
+                "token_id": "token-1",
+                "side": "buy",
+                "price_cents": 44.5,
+                "size_shares": 10.0,
+                "notional_usd_estimate": 4.45,
+                "created_at": "2026-03-01T12:00:00+00:00",
+                "trade_status": "submitted",
+                "wallet_address": "0xabc",
+                "outcome": "YES",
+            }
+        ][:limit]
 
 
 def test_trades_endpoint_shape() -> None:
@@ -88,3 +111,18 @@ def test_positions_endpoint_open_only_filter() -> None:
     assert all_payload["status"] == "ok"
     assert all_payload["open_only"] is False
     assert all_payload["count"] == 2
+
+
+def test_open_orders_endpoint_shape() -> None:
+    app = FastAPI()
+    app.include_router(open_orders_router)
+    app.state.orchestrator = DummyOrchestrator()
+
+    with TestClient(app) as client:
+        response = client.get("/orders/open?limit=10")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["count"] == 1
+    assert payload["orders"][0]["order_id"] == "ord-1"

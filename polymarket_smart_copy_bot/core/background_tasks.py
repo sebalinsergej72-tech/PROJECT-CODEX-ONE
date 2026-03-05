@@ -60,7 +60,7 @@ async def scheduled_stale_order_cleanup() -> None:
     if _ORCHESTRATOR_INSTANCE is None:
         logger.warning("Stale order cleanup job skipped: orchestrator is not initialized")
         return
-    await _ORCHESTRATOR_INSTANCE._run_stale_order_cleanup_job()
+    await _ORCHESTRATOR_INSTANCE._run_stale_order_cleanup_job(expired_by_ttl=True)
 
 
 # IMPROVED: status model — order fill monitoring entrypoint
@@ -143,14 +143,20 @@ class BackgroundOrchestrator:
             daily_pnl_usd=0.0,
             cumulative_pnl_usd=0.0,
             open_positions=0,
+            positions_value_usd=0.0,
+            open_order_reserve_usd=0.0,
+            reported_free_balance_usd=settings.default_starting_equity,
             daily_drawdown_pct=0.0,
         )
         self._last_exchange_balances: dict[str, Any] = {
             "source": "unknown",
             "free_balance_usd": None,
+            "net_free_balance_usd": None,
+            "open_orders_reserved_usd": None,
             "positions_value_usd": None,
             "total_balance_usd": None,
             "positions_count": 0,
+            "open_orders_count": 0,
             "updated_at": None,
         }
         self._started = False
@@ -319,8 +325,11 @@ class BackgroundOrchestrator:
     async def _run_capital_recalc_job(self) -> None:
         await self._in_session("capital_recalc", self._capital_recalc)
 
-    async def _run_stale_order_cleanup_job(self) -> None:
-        await self._in_session("stale_order_cleanup", self._stale_order_cleanup)
+    async def _run_stale_order_cleanup_job(self, *, expired_by_ttl: bool) -> None:
+        await self._in_session(
+            "stale_order_cleanup",
+            lambda session: self._stale_order_cleanup(session, expired_by_ttl=expired_by_ttl),
+        )
 
     async def _run_order_fill_monitor_job(self) -> None:
         await self._in_session("order_fill_monitor", self._order_fill_monitor)
@@ -338,7 +347,7 @@ class BackgroundOrchestrator:
                 await self.purge_stale_positions()
             await self._run_capital_recalc_job()
             await self._run_trade_monitor_job()
-            await self._run_stale_order_cleanup_job()
+            await self._run_stale_order_cleanup_job(expired_by_ttl=True)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -381,6 +390,8 @@ class BackgroundOrchestrator:
             )
 
     async def _trade_monitor_scan(self, session: AsyncSession) -> None:
+        await self.trade_executor.reconcile_open_trade_states(session)
+
         if not self._trading_enabled:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
             return
@@ -417,12 +428,10 @@ class BackgroundOrchestrator:
         self.last_trade_scan_at = datetime.now(tz=timezone.utc)
 
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
-        # Fetch live balance FIRST so that the CLOB client gets initialised before
-        # sync_account_open_positions is called.  Without this, _resolve_account_address()
-        # can return None on the very first cycle and the position reconciliation is skipped.
+        await self.trade_executor.reconcile_open_trade_states(session)
         if not self._dry_run:
             api_balance = await self.polymarket_client.fetch_account_balance_usd()
-            if api_balance is not None and api_balance > 0:
+            if api_balance is not None and api_balance >= 0:
                 await self.portfolio_tracker.update_capital_base(session, api_balance)
 
         await self.portfolio_tracker.sync_account_open_positions(session)
@@ -445,12 +454,32 @@ class BackgroundOrchestrator:
         self.last_capital_recalc_at = datetime.now(tz=timezone.utc)
         logger.info("Capital base recalculated: ${:.2f}", capital)
 
-    async def _stale_order_cleanup(self, session: AsyncSession) -> None:
-        del session  # no database writes required for this maintenance job
-        result = await self.polymarket_client.cancel_stale_orders(
-            stale_after_seconds=max(60, settings.stale_order_ttl_minutes * 60),
-            max_cancel=max(1, settings.stale_order_cancel_batch),
+    async def _stale_order_cleanup(self, session: AsyncSession, *, expired_by_ttl: bool) -> None:
+        tracked_order_ids = {
+            str(order_id).strip()
+            for order_id in (
+                await session.execute(
+                    select(CopiedTrade.order_id).where(
+                        CopiedTrade.order_id.is_not(None),
+                        CopiedTrade.status.in_([TradeStatus.SUBMITTED.value, TradeStatus.PARTIAL.value]),
+                    )
+                )
+            ).scalars().all()
+            if str(order_id).strip()
+        }
+        ttl_seconds = (
+            max(60, settings.aggressive_fill_ttl_seconds)
+            if self._risk_mode == "aggressive"
+            else max(60, settings.stale_order_ttl_minutes * 60)
         )
+        result = await self.polymarket_client.cancel_stale_orders(
+            stale_after_seconds=ttl_seconds,
+            max_cancel=max(1, settings.stale_order_cancel_batch),
+            allowed_order_ids=tracked_order_ids,
+        )
+        result["ttl_seconds"] = ttl_seconds
+        result["tracked_order_ids"] = len(tracked_order_ids)
+        result["sync_status"] = TradeStatus.EXPIRED.value if expired_by_ttl else TradeStatus.CANCELED.value
         self._last_stale_order_cleanup = result
         self.last_stale_order_cleanup_at = datetime.now(tz=timezone.utc)
 
@@ -462,6 +491,22 @@ class BackgroundOrchestrator:
         stale = int(result.get("stale", 0) or 0)
         cancelled = int(result.get("cancelled", 0) or 0)
         failed = int(result.get("failed", 0) or 0)
+        cancelled_ids = [
+            str(order_id).strip()
+            for order_id in result.get("cancelled_ids", []) or []
+            if str(order_id).strip()
+        ]
+        if cancelled_ids:
+            synced = await self.trade_executor.mark_canceled_orders(
+                session,
+                order_ids=cancelled_ids,
+                expired=expired_by_ttl,
+            )
+            logger.info(
+                "Synced {} stale order statuses back into copied_trades as {}",
+                synced,
+                TradeStatus.EXPIRED.value if expired_by_ttl else TradeStatus.CANCELED.value,
+            )
         if cancelled or failed:
             logger.warning(
                 "Stale order cleanup: scanned={} stale={} cancelled={} failed={}",
@@ -833,6 +878,18 @@ class BackgroundOrchestrator:
                 "drawdown_stop_pct": 0.12,
             }
 
+        # LIVE dashboard values should be anchored to Polymarket account balances
+        # when they are available.
+        display_total_equity = self._last_portfolio_state.total_equity_usd
+        display_exposure = self._last_portfolio_state.positions_value_usd or self._last_portfolio_state.exposure_usd
+        if not self._dry_run:
+            pm_total = self._last_exchange_balances.get("total_balance_usd")
+            pm_positions_value = self._last_exchange_balances.get("positions_value_usd")
+            if isinstance(pm_total, (int, float)):
+                display_total_equity = round(float(pm_total), 4)
+            if isinstance(pm_positions_value, (int, float)):
+                display_exposure = round(float(pm_positions_value), 4)
+
         return {
             "dry_run": self._dry_run,
             "risk_mode": self._risk_mode,
@@ -844,8 +901,10 @@ class BackgroundOrchestrator:
             "scheduler_running": self.scheduler.running,
             "tracked_wallets": self._tracked_wallets_count,
             "open_positions": self._last_portfolio_state.open_positions,
-            "total_equity_usd": self._last_portfolio_state.total_equity_usd,
-            "exposure_usd": self._last_portfolio_state.exposure_usd,
+            "total_equity_usd": display_total_equity,
+            "exposure_usd": display_exposure,
+            "available_cash_usd": self._last_portfolio_state.available_cash_usd,
+            "open_order_reserve_usd": self._last_portfolio_state.open_order_reserve_usd,
             "daily_pnl_usd": self._last_portfolio_state.daily_pnl_usd,
             "daily_drawdown_pct": self._last_portfolio_state.daily_drawdown_pct,
             "cumulative_pnl_usd": self._last_portfolio_state.cumulative_pnl_usd,
@@ -991,9 +1050,12 @@ class BackgroundOrchestrator:
         self._last_exchange_balances = {
             "source": balances.get("source", "unknown"),
             "free_balance_usd": balances.get("free_balance_usd"),
+            "net_free_balance_usd": balances.get("net_free_balance_usd"),
+            "open_orders_reserved_usd": balances.get("open_orders_reserved_usd"),
             "positions_value_usd": balances.get("positions_value_usd"),
             "total_balance_usd": balances.get("total_balance_usd"),
             "positions_count": balances.get("positions_count", 0),
+            "open_orders_count": balances.get("open_orders_count", 0),
             "updated_at": now_iso,
         }
 
@@ -1148,6 +1210,14 @@ class BackgroundOrchestrator:
                 "order_id": result.order_id
             }
 
+    async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
+        await self._run_stale_order_cleanup_job(expired_by_ttl=False)
+        return {
+            "ok": bool(self._last_stale_order_cleanup.get("ok", False)),
+            "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),
+            "cleanup": self._last_stale_order_cleanup,
+        }
+
     async def get_recent_trades(self, limit: int = 20) -> list[dict[str, Any]]:
         clamped_limit = max(1, min(limit, 200))
         rows = await self._in_session(
@@ -1172,6 +1242,40 @@ class BackgroundOrchestrator:
         )
         return rows or []
 
+    async def get_open_orders(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        clamped_limit = max(1, min(limit, 200))
+        rows = await self.polymarket_client.fetch_open_orders()
+        if rows is None:
+            return []
+
+        rows = sorted(rows, key=lambda row: row.created_at, reverse=True)[:clamped_limit]
+        order_ids = [row.order_id for row in rows if row.order_id]
+        linked = (
+            await self._in_session(
+                "open_order_trade_meta",
+                lambda session: self._fetch_open_order_trade_meta(session, order_ids),
+            )
+            if order_ids
+            else {}
+        ) or {}
+
+        return [
+            {
+                "order_id": row.order_id,
+                "market_id": row.market_id,
+                "token_id": row.token_id,
+                "side": row.side,
+                "price_cents": row.price_cents,
+                "size_shares": row.size,
+                "notional_usd_estimate": max((row.price_cents / 100.0) * row.size, 0.0),
+                "created_at": self._iso(row.created_at),
+                "trade_status": linked.get(row.order_id, {}).get("trade_status"),
+                "wallet_address": linked.get(row.order_id, {}).get("wallet_address"),
+                "outcome": linked.get(row.order_id, {}).get("outcome"),
+            }
+            for row in rows
+        ]
+
     async def _fetch_recent_trades(self, session: AsyncSession, limit: int) -> list[dict[str, Any]]:
         query = select(CopiedTrade).order_by(CopiedTrade.copied_at.desc()).limit(limit)
         rows = (await session.execute(query)).scalars().all()
@@ -1188,7 +1292,14 @@ class BackgroundOrchestrator:
                 "size_usd": row.size_usd,
                 "status": row.status,
                 "reason": row.reason,
+                "order_id": row.order_id,
                 "tx_hash": row.tx_hash,
+                "submitted_at": self._iso(row.submitted_at),
+                "filled_at": self._iso(row.filled_at),
+                "canceled_at": self._iso(row.canceled_at),
+                "filled_quantity": row.filled_quantity,
+                "filled_size_usd": row.filled_size_usd,
+                "filled_price_cents": row.filled_price_cents,
                 "source_timestamp": self._iso(row.source_timestamp),
                 "copied_at": self._iso(row.copied_at),
             }
@@ -1202,12 +1313,28 @@ class BackgroundOrchestrator:
         return int((await session.execute(query)).scalar_one())
 
     async def _fetch_positions(self, session: AsyncSession, *, open_only: bool, limit: int) -> list[dict[str, Any]]:
-        query = select(Position).order_by(Position.updated_at.desc()).limit(limit)
+        base_filters = []
         if open_only:
-            query = query.where(Position.is_open.is_(True))
-            # Exclude phantom/empty positions that have no real quantity or investment.
-            query = query.where(Position.quantity > 0, Position.invested_usd > 0)
+            base_filters.append(Position.is_open.is_(True))
+            base_filters.append(Position.quantity > 0)
+            base_filters.append(Position.invested_usd > 0)
 
+        live_sync_exists = False
+        if not self._dry_run:
+            live_sync_query = select(Position.id).where(
+                Position.wallet_address == self.portfolio_tracker.ACCOUNT_SYNC_WALLET,
+            )
+            if open_only:
+                live_sync_query = live_sync_query.where(Position.is_open.is_(True))
+            live_sync_exists = (await session.execute(live_sync_query.limit(1))).scalar_one_or_none() is not None
+
+        query = select(Position)
+        for condition in base_filters:
+            query = query.where(condition)
+        if live_sync_exists:
+            query = query.where(Position.wallet_address == self.portfolio_tracker.ACCOUNT_SYNC_WALLET)
+
+        query = query.order_by(Position.updated_at.desc()).limit(limit)
         rows = (await session.execute(query)).scalars().all()
 
         # When listing open positions, filter out dust (tiny leftover shares
@@ -1322,6 +1449,33 @@ class BackgroundOrchestrator:
             r["market_category"] = (cached.category if cached else "") or ""
 
         return rows
+
+    async def _fetch_open_order_trade_meta(
+        self,
+        session: AsyncSession,
+        order_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        if not order_ids:
+            return {}
+
+        query = (
+            select(CopiedTrade)
+            .where(CopiedTrade.order_id.in_(order_ids))
+            .order_by(CopiedTrade.copied_at.desc())
+        )
+        rows = (await session.execute(query)).scalars().all()
+
+        linked: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not row.order_id or row.order_id in linked:
+                continue
+            linked[row.order_id] = {
+                # IMPROVED: expose local lifecycle state next to the real exchange open order.
+                "trade_status": row.status,
+                "wallet_address": row.wallet_address,
+                "outcome": row.outcome,
+            }
+        return linked
 
     async def _get_runtime_text(self, session: AsyncSession, key: str) -> str | None:
         row = (await session.execute(select(BotRuntimeState).where(BotRuntimeState.key == key))).scalar_one_or_none()

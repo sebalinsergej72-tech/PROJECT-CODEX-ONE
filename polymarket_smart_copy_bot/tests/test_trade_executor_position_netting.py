@@ -7,8 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from core.trade_executor import TradeExecutor
+from core.risk_manager import PortfolioState
 from core.trade_monitor import TradeIntent
-from models.models import Base, Position, TradeSide
+from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 
 
 def _intent(*, side: str, price_cents: float, size_usd: float) -> TradeIntent:
@@ -100,5 +101,67 @@ def test_upsert_position_flip_after_full_close() -> None:
         assert row.quantity == pytest.approx(30.0, rel=1e-6)
         assert row.invested_usd == pytest.approx(12.0, rel=1e-6)
         assert row.realized_pnl_usd == pytest.approx(-2.0, rel=1e-6)
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_market_position_precheck_counts_pending_submitted_orders() -> None:
+    class _DummyClient:
+        pass
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(_DummyClient(), _DummyClient(), _DummyClient(), _DummyPortfolioTracker())
+        session.add(
+            CopiedTrade(
+                external_trade_id="ext-submitted-1",
+                wallet_address="0xabc",
+                market_id="mkt-1",
+                token_id="tok-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=55.0,
+                size_usd=4.0,
+                filled_size_usd=1.5,
+                status=TradeStatus.PARTIAL.value,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="ext-submitted-2",
+                wallet_address="0xdef",
+                market_id="mkt-1",
+                token_id="tok-2",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=44.0,
+                size_usd=3.0,
+                filled_size_usd=0.0,
+                status=TradeStatus.SUBMITTED.value,
+            )
+        )
+        await session.flush()
+
+        portfolio = PortfolioState(
+            total_equity_usd=100.0,
+            available_cash_usd=100.0,
+            exposure_usd=0.0,
+            daily_pnl_usd=0.0,
+            cumulative_pnl_usd=0.0,
+            open_positions=0,
+        )
+        allowed = await executor._apply_market_position_precheck(
+            session=session,
+            market_id="mkt-1",
+            requested_size_usd=10.0,
+            portfolio_state=portfolio,
+            risk_mode="aggressive",
+        )
+
+        # aggressive market cap = 10% of $100 = $10
+        # pending reserve = (4.0 - 1.5) + 3.0 = 5.5
+        assert allowed == pytest.approx(4.5, rel=1e-6)
 
     asyncio.run(_run_with_session(_case))

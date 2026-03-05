@@ -44,6 +44,26 @@ function categoryBadge(category: string | undefined) {
   );
 }
 
+function statusTone(status: string | undefined) {
+  switch ((status || "").toLowerCase()) {
+    case "filled":
+    case "executed":
+      return "text-profit";
+    case "partial":
+      return "text-warning";
+    case "submitted":
+      return "text-primary";
+    case "canceled":
+    case "expired":
+    case "skipped":
+      return "text-muted-foreground";
+    case "failed":
+      return "text-loss";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
 export function TradesTable({ trades, status, isLoading }: Props) {
   const liveOnly = status && !status.dry_run && Boolean(status.live_started_at);
   const liveStartedAt = liveOnly && status?.live_started_at ? Date.parse(status.live_started_at) : Number.NaN;
@@ -90,23 +110,21 @@ export function TradesTable({ trades, status, isLoading }: Props) {
 
             {!isLoading
               ? filtered.map((t, i) => {
-                // Map internal statuses to display labels and colors
+                const effectivePrice =
+                  t.status === "filled" || t.status === "partial"
+                    ? (t.filled_price_cents ?? t.price_cents ?? 0)
+                    : (t.price_cents ?? 0);
+                const effectiveSize =
+                  t.status === "filled" || t.status === "partial"
+                    ? (t.filled_size_usd ?? t.size_usd ?? 0)
+                    : (t.size_usd ?? 0);
                 const statusLabel =
                   t.status === "filled" || t.status === "executed"
                     ? "EXECUTED"
                     : t.status === "submitted" || t.status === "partial"
                       ? "AWAITING"
                       : (t.status || "-").toUpperCase();
-                const statusColor =
-                  t.status === "filled" || t.status === "executed"
-                    ? "text-profit"
-                    : t.status === "submitted" || t.status === "partial"
-                      ? "text-warning"
-                      : t.status === "failed"
-                        ? "text-loss"
-                        : t.status === "canceled" || t.status === "expired"
-                          ? "text-warning"
-                          : "text-muted-foreground";
+                const statusColor = statusTone(t.status);
                 return (
                   <tr key={`${t.copied_at}-${t.market_id}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
                     <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
@@ -138,9 +156,9 @@ export function TradesTable({ trades, status, isLoading }: Props) {
                       {categoryBadge(t.market_category)}
                     </td>
                     <td className="py-2 pr-3 font-mono text-xs">
-                      {(t.side || "-").toUpperCase()} @ {(t.price_cents || 0).toFixed(1)}¢
+                      {(t.side || "-").toUpperCase()} @ {effectivePrice.toFixed(1)}¢
                     </td>
-                    <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(t.size_usd || 0)}</td>
+                    <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(effectiveSize || 0)}</td>
                     <td className="py-2 font-mono text-xs text-muted-foreground">{shortAddr(t.wallet_address)}</td>
                   </tr>
                 );

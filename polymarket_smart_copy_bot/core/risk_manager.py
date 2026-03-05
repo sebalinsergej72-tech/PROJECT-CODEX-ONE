@@ -14,6 +14,9 @@ class PortfolioState:
     daily_pnl_usd: float
     cumulative_pnl_usd: float
     open_positions: int
+    positions_value_usd: float = 0.0
+    open_order_reserve_usd: float = 0.0
+    reported_free_balance_usd: float = 0.0
     daily_drawdown_pct: float = 0.0
 
 
@@ -80,6 +83,42 @@ class RiskManager:
 
     def should_trigger_drawdown_stop(self, portfolio: PortfolioState, risk_mode: RiskMode) -> bool:
         return self._global_drawdown_triggered(portfolio, risk_mode) or self._drawdown_stop_triggered(portfolio, risk_mode)
+
+    # SAFETY: safe aggressive fill
+    def can_accept_slippage(
+        self,
+        *,
+        source_price_cents: float,
+        execution_price_cents: float,
+        side: Literal["buy", "sell"],
+        risk_mode: RiskMode,
+    ) -> tuple[bool, float]:
+        """Validate slippage against hard risk guardrails."""
+
+        slippage_bps = self.compute_slippage_bps(
+            source_price_cents=source_price_cents,
+            execution_price_cents=execution_price_cents,
+            side=side,
+        )
+        if risk_mode != "aggressive":
+            # Conservative mode should not intentionally add slippage.
+            return slippage_bps <= 0.0, slippage_bps
+        return slippage_bps <= settings.max_allowed_slippage_bps, slippage_bps
+
+    @staticmethod
+    def compute_slippage_bps(
+        *,
+        source_price_cents: float,
+        execution_price_cents: float,
+        side: Literal["buy", "sell"],
+    ) -> float:
+        """Return positive bps for worse-than-source execution."""
+
+        source = max(source_price_cents, 0.0001)
+        execution = max(execution_price_cents, 0.0001)
+        if side == "buy":
+            return max(((execution - source) / source) * 10_000.0, 0.0)
+        return max(((source - execution) / source) * 10_000.0, 0.0)
 
     def _evaluate_aggressive(
         self,

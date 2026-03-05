@@ -32,6 +32,8 @@ export interface BotStatus {
   open_positions: number;
   total_equity_usd: number;
   exposure_usd: number;
+  available_cash_usd?: number;
+  open_order_reserve_usd?: number;
   price_filter_enabled: boolean;
   high_conviction_boost_enabled: boolean;
   discovery_autoadd: boolean;
@@ -55,14 +57,18 @@ export interface BotStatus {
   account_balances?: {
     source: string;
     free_balance_usd: number | null;
+    net_free_balance_usd: number | null;
+    open_orders_reserved_usd: number | null;
     positions_value_usd: number | null;
     total_balance_usd: number | null;
     positions_count: number;
+    open_orders_count: number;
     updated_at: string | null;
   };
 }
 
 export interface Trade {
+  id?: number;
   copied_at?: string;
   status?: string;
   reason?: string | null;
@@ -71,10 +77,19 @@ export interface Trade {
   market_id: string;
   market_title?: string;
   market_category?: string;
+  token_id?: string;
+  outcome?: string;
   side: string;
   price_cents: number;
   size_usd: number;
   wallet_address: string;
+  order_id?: string | null;
+  submitted_at?: string | null;
+  filled_at?: string | null;
+  canceled_at?: string | null;
+  filled_quantity?: number;
+  filled_size_usd?: number;
+  filled_price_cents?: number;
 }
 
 export interface Position {
@@ -91,6 +106,20 @@ export interface Position {
   realized_pnl_usd: number;
   unrealized_pnl_usd: number;
   updated_at: string;
+}
+
+export interface OpenOrder {
+  order_id: string;
+  market_id: string | null;
+  token_id?: string | null;
+  side: string;
+  price_cents: number;
+  size_shares: number;
+  notional_usd_estimate: number;
+  created_at: string | null;
+  trade_status?: string | null;
+  wallet_address?: string | null;
+  outcome?: string | null;
 }
 
 export async function fetchStatus(): Promise<BotStatus> {
@@ -111,6 +140,13 @@ export async function fetchPositions(limit = 12): Promise<Position[]> {
   if (!resp.ok) throw new Error(`Positions: HTTP ${resp.status}`);
   const data = (await resp.json()) as { positions?: Position[] };
   return data.positions || [];
+}
+
+export async function fetchOpenOrders(limit = 12): Promise<OpenOrder[]> {
+  const resp = await fetch(`${getBaseUrl()}/orders/open?limit=${limit}`);
+  if (!resp.ok) throw new Error(`Open orders: HTTP ${resp.status}`);
+  const data = (await resp.json()) as { orders?: OpenOrder[] };
+  return data.orders || [];
 }
 
 export async function postControl(path: string, payload: Record<string, unknown>) {

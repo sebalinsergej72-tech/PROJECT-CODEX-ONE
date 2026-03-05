@@ -4,7 +4,7 @@ import asyncio
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 import certifi
@@ -80,6 +80,20 @@ class OpenOrderInfo:
     price_cents: float
     size: float
     created_at: datetime
+    raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class FillInfo:
+    trade_id: str
+    order_id: str | None
+    market_id: str | None
+    token_id: str | None
+    side: str
+    price_cents: float
+    size_shares: float
+    size_usd: float
+    traded_at: datetime
     raw: dict[str, Any]
 
 
@@ -467,20 +481,25 @@ class PolymarketClient:
     async def fetch_live_account_balances(self) -> dict[str, Any]:
         """Fetch account balances strictly from Polymarket sources.
 
-        Returns free collateral (cash), open positions current value, and total.
+        Returns free collateral (cash), open positions current value, open-order
+        reserve, and total equity snapshot derived from Polymarket APIs.
         """
 
         if self._dry_run:
             return {
                 "source": "dry_run",
                 "free_balance_usd": None,
+                "net_free_balance_usd": None,
+                "open_orders_reserved_usd": None,
                 "positions_value_usd": None,
                 "total_balance_usd": None,
                 "positions_count": 0,
+                "open_orders_count": 0,
             }
 
         free_balance = await self.fetch_account_balance_usd()
         open_positions = await self.fetch_account_open_positions(limit=500)
+        open_orders = await self.fetch_open_orders()
 
         positions_value: float | None = None
         positions_count = 0
@@ -496,16 +515,36 @@ class PolymarketClient:
                 4,
             )
 
+        open_orders_reserved: float | None = None
+        open_orders_count = 0
+        if open_orders is not None:
+            open_orders_count = len(open_orders)
+            open_orders_reserved = round(
+                sum(
+                    max((float(order.price_cents) / 100.0) * max(float(order.size), 0.0), 0.0)
+                    for order in open_orders
+                ),
+                4,
+            )
+
         total_balance: float | None = None
         if free_balance is not None and positions_value is not None:
             total_balance = round(float(free_balance) + positions_value, 4)
 
+        net_free_balance: float | None = None
+        if free_balance is not None and open_orders_reserved is not None:
+            # SAFETY: use a conservative free-cash estimate for sizing.
+            net_free_balance = round(max(float(free_balance) - float(open_orders_reserved), 0.0), 4)
+
         return {
             "source": "polymarket",
             "free_balance_usd": round(float(free_balance), 4) if free_balance is not None else None,
+            "net_free_balance_usd": net_free_balance,
+            "open_orders_reserved_usd": open_orders_reserved,
             "positions_value_usd": positions_value,
             "total_balance_usd": total_balance,
             "positions_count": positions_count,
+            "open_orders_count": open_orders_count,
         }
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
@@ -587,11 +626,103 @@ class PolymarketClient:
                 orders.append(parsed)
         return orders
 
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel one order by id."""
+
+        if self._dry_run:
+            return True
+        if not settings.polymarket_private_key:
+            return False
+        if not order_id:
+            return False
+        try:
+            return bool(await asyncio.to_thread(self._cancel_order_sync, order_id))
+        except Exception as exc:
+            logger.warning("Failed to cancel order {}: {}", order_id, exc)
+            return False
+
+    async def is_order_open(self, order_id: str) -> bool | None:
+        """Return whether an order is currently open.
+
+        Returns:
+            True/False on successful fetch, None on upstream/API errors.
+        """
+
+        if self._dry_run:
+            return False
+        if not settings.polymarket_private_key:
+            return None
+        if not order_id:
+            return None
+        try:
+            payload = await asyncio.to_thread(self._get_order_sync, order_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch order {}: {}", order_id, exc)
+            return None
+        return self._is_open_order_payload(payload)
+
+    async def fetch_account_fills(
+        self,
+        *,
+        after_ts: datetime,
+        market_id: str | None = None,
+        token_id: str | None = None,
+        side: str | None = None,
+        order_id: str | None = None,
+        limit: int = 200,
+    ) -> list[FillInfo] | None:
+        """Fetch authenticated account fills from CLOB.
+
+        This is the authoritative source for filled/partial trade states.
+        """
+
+        if self._dry_run:
+            return []
+        if not settings.polymarket_private_key:
+            return None
+
+        safe_limit = max(1, min(limit, 500))
+        try:
+            rows = await asyncio.to_thread(
+                self._fetch_account_fills_sync,
+                after_ts,
+                market_id,
+                token_id,
+                safe_limit,
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch account fills: {}", exc)
+            return None
+
+        target_side = side.lower() if isinstance(side, str) else None
+        target_order_id = order_id.strip() if isinstance(order_id, str) and order_id.strip() else None
+        fills: list[FillInfo] = []
+        for row in rows:
+            parsed = self._parse_fill_row(row)
+            if parsed is None:
+                continue
+            if parsed.traded_at < after_ts:
+                continue
+            if market_id and parsed.market_id != market_id:
+                continue
+            if token_id and parsed.token_id != token_id:
+                continue
+            if target_side and parsed.side != target_side:
+                continue
+            if target_order_id and parsed.order_id != target_order_id:
+                continue
+            fills.append(parsed)
+            if len(fills) >= safe_limit:
+                break
+        fills.sort(key=lambda row: row.traded_at, reverse=True)
+        return fills
+
     async def cancel_stale_orders(
         self,
         *,
         stale_after_seconds: int,
         max_cancel: int,
+        allowed_order_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Cancel stale open orders older than the configured TTL."""
 
@@ -602,6 +733,7 @@ class PolymarketClient:
                 "scanned": 0,
                 "stale": 0,
                 "cancelled": 0,
+                "cancelled_ids": [],
                 "failed": 0,
                 "failed_ids": [],
             }
@@ -615,21 +747,32 @@ class PolymarketClient:
                 "scanned": 0,
                 "stale": 0,
                 "cancelled": 0,
+                "cancelled_ids": [],
                 "failed": 0,
                 "failed_ids": [],
             }
 
         now = datetime.now(tz=timezone.utc)
         threshold = max(stale_after_seconds, 60)
+        allowed_ids = (
+            {order_id.strip() for order_id in allowed_order_ids if order_id and order_id.strip()}
+            if allowed_order_ids is not None
+            else None
+        )
+        if allowed_ids is None:
+            filtered_orders = list(open_orders)
+        else:
+            filtered_orders = [order for order in open_orders if order.order_id in allowed_ids]
         stale_orders = [
             order
-            for order in open_orders
+            for order in filtered_orders
             if (now - order.created_at).total_seconds() >= threshold
         ]
         stale_orders.sort(key=lambda row: row.created_at)
 
         to_cancel = stale_orders[: max(1, max_cancel)]
         cancelled = 0
+        cancelled_ids: list[str] = []
         failed_ids: list[str] = []
         for order in to_cancel:
             try:
@@ -639,15 +782,18 @@ class PolymarketClient:
                 success = False
             if success:
                 cancelled += 1
+                cancelled_ids.append(order.order_id)
             else:
                 failed_ids.append(order.order_id)
 
         return {
             "ok": True,
             "dry_run": False,
-            "scanned": len(open_orders),
+            "scanned": len(filtered_orders),
+            "tracked_open_orders": len(filtered_orders),
             "stale": len(stale_orders),
             "cancelled": cancelled,
+            "cancelled_ids": cancelled_ids,
             "failed": len(failed_ids),
             "failed_ids": failed_ids,
         }
@@ -768,6 +914,34 @@ class PolymarketClient:
         if not isinstance(response, list):
             return []
         return [row for row in response if isinstance(row, dict)]
+
+    def _get_order_sync(self, order_id: str) -> dict[str, Any] | None:
+        clob_client = self._ensure_clob_client()
+        response = clob_client.get_order(order_id)
+        return response if isinstance(response, dict) else None
+
+    def _fetch_account_fills_sync(
+        self,
+        after_ts: datetime,
+        market_id: str | None,
+        token_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        from py_clob_client.clob_types import TradeParams
+
+        clob_client = self._ensure_clob_client()
+        after_unix = int(after_ts.timestamp())
+        params = TradeParams(
+            market=market_id or None,
+            asset_id=token_id or None,
+            after=max(after_unix, 0),
+        )
+        response = clob_client.get_trades(params=params)
+        if not isinstance(response, list):
+            return []
+        rows = [row for row in response if isinstance(row, dict)]
+        rows.sort(key=lambda row: self._parse_timestamp(row.get("timestamp") or row.get("createdAt")), reverse=True)
+        return rows[:limit]
 
     def _cancel_order_sync(self, order_id: str) -> bool:
         clob_client = self._ensure_clob_client()
@@ -1108,6 +1282,85 @@ class PolymarketClient:
             created_at=created_at,
             raw=row,
         )
+
+    @staticmethod
+    def _parse_fill_row(row: dict[str, Any]) -> FillInfo | None:
+        trade_id = str(row.get("id") or row.get("tradeID") or row.get("tradeId") or "").strip()
+        if not trade_id:
+            return None
+
+        token_id = row.get("asset_id") or row.get("asset") or row.get("tokenId") or row.get("tokenID")
+        market_id = row.get("market") or row.get("marketId") or row.get("conditionId")
+        side = str(row.get("side") or row.get("type") or "").lower()
+
+        price = PolymarketClient._parse_numeric(row.get("price") or row.get("pricePaid") or row.get("avgPrice"))
+        size_shares = PolymarketClient._parse_numeric(row.get("size") or row.get("amount") or row.get("filled_size"))
+        if price is None or size_shares is None:
+            return None
+        if price <= 0 or size_shares <= 0:
+            return None
+
+        order_id = (
+            row.get("orderID")
+            or row.get("orderId")
+            or row.get("order_id")
+            or row.get("makerOrderID")
+            or row.get("takerOrderID")
+            or row.get("makerOrderId")
+            or row.get("takerOrderId")
+        )
+
+        traded_at = PolymarketClient._parse_timestamp(
+            row.get("timestamp") or row.get("createdAt") or row.get("time")
+        )
+        price_cents = ensure_price_in_cents(price)
+        size_usd = float(price) * float(size_shares)
+
+        return FillInfo(
+            trade_id=trade_id,
+            order_id=str(order_id) if order_id else None,
+            market_id=str(market_id) if market_id else None,
+            token_id=str(token_id) if token_id else None,
+            side=side,
+            price_cents=price_cents,
+            size_shares=float(size_shares),
+            size_usd=max(size_usd, 0.0),
+            traded_at=traded_at,
+            raw=row,
+        )
+
+    @staticmethod
+    def _is_open_order_payload(payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+
+        status = str(payload.get("status") or payload.get("state") or "").lower()
+        if status in {"open", "live", "active"}:
+            return True
+        if status in {"filled", "cancelled", "canceled", "expired", "closed", "done"}:
+            return False
+
+        remaining = PolymarketClient._parse_numeric(
+            payload.get("remaining_size")
+            or payload.get("remainingSize")
+            or payload.get("size_open")
+        )
+        if remaining is not None:
+            return remaining > 0
+
+        filled = PolymarketClient._parse_numeric(
+            payload.get("filled_size")
+            or payload.get("filledSize")
+            or payload.get("matched_size")
+        )
+        total = PolymarketClient._parse_numeric(
+            payload.get("size")
+            or payload.get("original_size")
+            or payload.get("amount")
+        )
+        if filled is not None and total is not None:
+            return filled < total
+        return False
 
     @staticmethod
     def _coerce_rows(payload: Any) -> list[dict[str, Any]]:

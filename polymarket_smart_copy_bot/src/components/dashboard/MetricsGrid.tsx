@@ -52,6 +52,16 @@ export function MetricsGrid({ status }: Props) {
       value: moneyNullable(status.account_balances?.free_balance_usd),
       tone: "neutral" as const,
     },
+    {
+      label: "Reserved Orders (PM)",
+      value: moneyNullable(status.account_balances?.open_orders_reserved_usd),
+      tone: "neutral" as const,
+    },
+    {
+      label: "Net Free (PM)",
+      value: moneyNullable(status.account_balances?.net_free_balance_usd),
+      tone: "neutral" as const,
+    },
   ];
 
   return (

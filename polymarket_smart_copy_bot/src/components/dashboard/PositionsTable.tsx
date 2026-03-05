@@ -60,7 +60,20 @@ export function PositionsTable({ positions, isLoading }: Props) {
     });
   };
 
-  const cols = ["Market", "Outcome", "Side", "Qty", "Avg Price", "Cur Price", "Invested", "Cur Value", "U-PnL", "Updated", "Action"];
+  const cols = [
+    "Market",
+    "Outcome",
+    "Side",
+    "Qty",
+    "Avg Price",
+    "Cur Price",
+    "Invested",
+    "Cur Value",
+    "R-PnL",
+    "U-PnL",
+    "Updated",
+    "Action",
+  ];
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="trading-card overflow-hidden">
@@ -100,9 +113,10 @@ export function PositionsTable({ positions, isLoading }: Props) {
             {!isLoading
               ? positions?.map((p, i) => {
                 const uPnl = p.unrealized_pnl_usd || 0;
+                const rPnl = p.realized_pnl_usd || 0;
                 const qty = p.quantity || 0;
                 const curPrice = p.current_price_cents || 0;
-                const curValue = (qty * curPrice) / 100;
+                const curValue = Math.max((p.invested_usd || 0) + uPnl, 0);
                 return (
                   <tr key={`${p.market_id}-${p.outcome}-${i}`} className="border-b border-border/30 transition-colors hover:bg-secondary/30">
                     <td className="max-w-[220px] py-2 pr-3 text-xs" title={p.market_title || p.market_id || ""}>
@@ -118,6 +132,7 @@ export function PositionsTable({ positions, isLoading }: Props) {
                     <td className="py-2 pr-3 font-mono text-xs">{cents(curPrice)}</td>
                     <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(p.invested_usd || 0)}</td>
                     <td className="py-2 pr-3 font-mono text-xs font-semibold">{money(curValue)}</td>
+                    <td className={`py-2 pr-3 font-mono text-xs font-bold ${pnlClass(rPnl)}`}>{money(rPnl)}</td>
                     <td className={`py-2 pr-3 font-mono text-xs font-bold ${pnlClass(uPnl)}`}>{money(uPnl)}</td>
                     <td className="py-2 pr-3 font-mono text-xs text-muted-foreground">
                       {(p.updated_at || "-").replace("T", " ").slice(0, 19)}

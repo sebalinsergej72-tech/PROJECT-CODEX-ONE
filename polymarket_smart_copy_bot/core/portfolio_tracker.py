@@ -301,7 +301,7 @@ class PortfolioTracker:
             current_base = settings.default_starting_equity
 
         api_balance = await self.polymarket_client.fetch_account_balance_usd()
-        if api_balance is not None and api_balance > 0:
+        if api_balance is not None and api_balance >= 0:
             # Live API balance is authoritative and should override stale runtime values.
             current_base = api_balance
         elif settings.auto_reinvest and risk_mode == "aggressive":
@@ -327,8 +327,32 @@ class PortfolioTracker:
     DUST_VALUE_THRESHOLD_USD = 0.05
 
     async def calculate_state(self, session: AsyncSession, risk_mode: RiskMode) -> PortfolioState:
-        open_positions_query = select(Position).where(Position.is_open.is_(True))
-        positions = (await session.execute(open_positions_query)).scalars().all()
+        if self.polymarket_client.is_dry_run():
+            positions = (
+                await session.execute(
+                    select(Position).where(Position.is_open.is_(True))
+                )
+            ).scalars().all()
+        else:
+            # LIVE mode: dashboard/risk state must follow real account positions
+            # synced from Polymarket (`wallet_address == ACCOUNT_SYNC_WALLET`).
+            account_positions = (
+                await session.execute(
+                    select(Position).where(
+                        Position.is_open.is_(True),
+                        Position.wallet_address == self.ACCOUNT_SYNC_WALLET,
+                    )
+                )
+            ).scalars().all()
+            if account_positions:
+                positions = account_positions
+            else:
+                # Startup fallback before first account sync finishes.
+                positions = (
+                    await session.execute(
+                        select(Position).where(Position.is_open.is_(True))
+                    )
+                ).scalars().all()
 
         # Exposure = current market value of positions, NOT historical cost.
         # Using invested_usd would overstate exposure for positions that lost
@@ -350,7 +374,7 @@ class PortfolioTracker:
         # from closed trades are never lost from the equity calculation.
         all_realized_query = select(func.coalesce(func.sum(Position.realized_pnl_usd), 0.0))
         total_realized = float((await session.execute(all_realized_query)).scalar_one())
-
+        positions_value = exposure
         capital_base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
         if capital_base is None:
             capital_base = settings.default_starting_equity
@@ -364,15 +388,52 @@ class PortfolioTracker:
         # In LIVE mode, `capital_base` comes from CLOB collateral balance (cash component),
         # which already includes realized PnL, so we only add position market value.
         if self.polymarket_client.is_dry_run():
+            # Sum realized PnL from ALL positions (open AND closed) so that
+            # profits from closed trades are never lost in DRY_RUN equity.
+            all_realized_query = select(func.coalesce(func.sum(Position.realized_pnl_usd), 0.0))
+            total_realized = float((await session.execute(all_realized_query)).scalar_one())
             current_delta = total_realized + unrealized
             total_equity = capital_base + current_delta
             available_cash = max(total_equity - exposure, 0.0)
+            open_order_reserve = 0.0
+            reported_free_balance = available_cash
         else:
             # Mark-to-market equity = cash collateral + current position value.
             # `exposure` is already current market value (qty * price), so no
             # need to add unrealized PnL separately.
-            total_equity = capital_base + exposure
-            available_cash = max(capital_base, 0.0)
+            # LIVE mode must follow the exchange snapshot and explicitly reserve
+            # collateral locked in resting orders so risk sizing stays conservative.
+            balances = await self.polymarket_client.fetch_live_account_balances()
+            reported_total = balances.get("total_balance_usd") if isinstance(balances, dict) else None
+            reported_positions = balances.get("positions_value_usd") if isinstance(balances, dict) else None
+            reported_free = balances.get("free_balance_usd") if isinstance(balances, dict) else None
+            reported_net_free = balances.get("net_free_balance_usd") if isinstance(balances, dict) else None
+            reported_reserve = balances.get("open_orders_reserved_usd") if isinstance(balances, dict) else None
+
+            positions_value = (
+                round(float(reported_positions), 4)
+                if isinstance(reported_positions, (int, float))
+                else round(positions_value, 4)
+            )
+            total_equity = (
+                round(float(reported_total), 4)
+                if isinstance(reported_total, (int, float))
+                else round(capital_base + positions_value, 4)
+            )
+            open_order_reserve = (
+                round(float(reported_reserve), 4)
+                if isinstance(reported_reserve, (int, float))
+                else 0.0
+            )
+            reported_free_balance = (
+                round(float(reported_free), 4)
+                if isinstance(reported_free, (int, float))
+                else round(max(capital_base, 0.0), 4)
+            )
+            if isinstance(reported_net_free, (int, float)):
+                available_cash = round(max(float(reported_net_free), 0.0), 4)
+            else:
+                available_cash = round(max(reported_free_balance - open_order_reserve, 0.0), 4)
 
         cumulative_pnl = total_equity - initial_capital
 
@@ -385,6 +446,9 @@ class PortfolioTracker:
             daily_pnl_usd=round(daily_pnl, 4),
             cumulative_pnl_usd=round(cumulative_pnl, 4),
             open_positions=meaningful,
+            positions_value_usd=round(positions_value, 4),
+            open_order_reserve_usd=round(open_order_reserve, 4),
+            reported_free_balance_usd=round(reported_free_balance, 4),
             daily_drawdown_pct=round(daily_drawdown_pct, 6),
         )
 

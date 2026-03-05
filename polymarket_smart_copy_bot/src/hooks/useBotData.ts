@@ -1,7 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { fetchPositions, fetchStatus, fetchTrades, fetchPortfolioHistory, fetchLeaderboard, closePosition } from "@/lib/api";
+import {
+  closePosition,
+  fetchLeaderboard,
+  fetchOpenOrders,
+  fetchPortfolioHistory,
+  fetchPositions,
+  fetchStatus,
+  fetchTrades,
+} from "@/lib/api";
 
 export function useBotStatus(refreshMs = 5000) {
   return useQuery({
@@ -25,6 +33,15 @@ export function useBotPositions(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-positions"],
     queryFn: () => fetchPositions(50),
+    refetchInterval: refreshMs,
+    retry: 1,
+  });
+}
+
+export function useBotOpenOrders(refreshMs = 5000) {
+  return useQuery({
+    queryKey: ["bot-open-orders"],
+    queryFn: () => fetchOpenOrders(25),
     refetchInterval: refreshMs,
     retry: 1,
   });
