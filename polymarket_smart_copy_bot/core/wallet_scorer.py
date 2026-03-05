@@ -210,22 +210,22 @@ class WalletScorer:
         avg_position_size: float,
         score: float,
     ) -> tuple[bool, str]:
-        # IMPROVED: Adjusted qualification thresholds to realistically fit Polymarket trader distributions
-        if win_rate < 0.53:
-            return False, "win_rate_below_53pct"
+        # IMPROVED: Adjusted qualification thresholds to a balanced golden mean for Polymarket
+        if win_rate < 0.58:
+            return False, "win_rate_below_58pct"
             
         # IMPROVED: Strict protection against "one-hit wonders" (requires verified recent 30d activity)
-        if trade_count_30d < 10:
+        if trade_count_30d < 25:
             return False, "too_inactive_recently_30d"
             
-        if trade_count_90d < 30:
-            return False, "trade_count_below_30_90d"
+        if trade_count_90d < 80:
+            return False, "trade_count_below_80_90d"
             
-        if profit_factor < 1.15:
-            return False, "profit_factor_below_1_15"
+        if profit_factor < 1.40:
+            return False, "profit_factor_below_1_40"
             
-        if avg_position_size <= 100:
-            return False, "avg_position_below_100"
+        if avg_position_size <= 250:
+            return False, "avg_position_below_250"
             
         if score < 0.40:
             return False, "score_below_0_40"
