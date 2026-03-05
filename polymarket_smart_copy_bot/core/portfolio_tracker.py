@@ -330,7 +330,13 @@ class PortfolioTracker:
         open_positions_query = select(Position).where(Position.is_open.is_(True))
         positions = (await session.execute(open_positions_query)).scalars().all()
 
-        exposure = sum(position.invested_usd for position in positions)
+        # Exposure = current market value of positions, NOT historical cost.
+        # Using invested_usd would overstate exposure for positions that lost
+        # value (resolved markets, expired bets) and block new trades.
+        exposure = sum(
+            max(position.quantity * position.current_price_cents / 100, 0.0)
+            for position in positions
+        )
         unrealized = sum(position.unrealized_pnl_usd for position in positions)
 
         # Count only meaningful positions for the dashboard counter.
@@ -363,8 +369,9 @@ class PortfolioTracker:
             available_cash = max(total_equity - exposure, 0.0)
         else:
             # Mark-to-market equity = cash collateral + current position value.
-            # Current position value = invested_cost + unrealized_pnl.
-            total_equity = capital_base + exposure + unrealized
+            # `exposure` is already current market value (qty * price), so no
+            # need to add unrealized PnL separately.
+            total_equity = capital_base + exposure
             available_cash = max(capital_base, 0.0)
 
         cumulative_pnl = total_equity - initial_capital
