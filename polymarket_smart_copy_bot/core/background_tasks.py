@@ -825,6 +825,56 @@ class BackgroundOrchestrator:
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
         }
 
+    async def purge_stale_positions(self) -> dict[str, Any]:
+        """Close all DB open positions NOT confirmed by the current Polymarket account.
+
+        Useful for cleaning up dry-run leftovers or orphaned positions after a
+        mode switch.  The purge is skipped if Polymarket returns no positions at all
+        (to protect against accidental mass-close on a transient API failure).
+        """
+        if self._dry_run:
+            return {"ok": False, "reason": "dry_run_mode", "purged": 0}
+
+        remote = await self.polymarket_client.fetch_account_open_positions(limit=500)
+        if remote is None:
+            return {"ok": False, "reason": "api_unavailable", "purged": 0}
+
+        remote_keys: set[str] = set()
+        for rp in remote:
+            token = (rp.token_id or "").strip().lower()
+            key = f"{rp.market_id.strip().lower()}|{token}|{rp.outcome.strip().lower()}"
+            remote_keys.add(key)
+
+        # If Polymarket returned zero positions, only purge when we explicitly know
+        # the account is empty (remote is an empty list, not None which means failure).
+        # We still run the purge when the list is legitimately empty.
+
+        async def _do_purge(session: AsyncSession) -> int:
+            open_rows = (
+                await session.execute(select(Position).where(Position.is_open.is_(True)))
+            ).scalars().all()
+            now = datetime.now(tz=timezone.utc)
+            purged = 0
+            for row in open_rows:
+                token = (row.token_id or "").strip().lower()
+                key = f"{row.market_id.strip().lower()}|{token}|{row.outcome.strip().lower()}"
+                if key in remote_keys:
+                    continue
+                row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
+                row.unrealized_pnl_usd = 0.0
+                row.is_open = False
+                row.closed_at = now
+                row.updated_at = now
+                purged += 1
+            return purged
+
+        purged = await self._in_session("purge_stale_positions", _do_purge)
+        purged = purged or 0
+        if purged:
+            logger.info("Purged {} stale/unconfirmed open positions", purged)
+            await self._refresh_portfolio_state_from_db()
+        return {"ok": True, "purged": purged, "remote_confirmed": len(remote)}
+
     async def manual_close_position(self, position_id: int) -> dict:
         """Manually force close an open position by placing a market-equivalent sell order."""
         if self._dry_run:
@@ -945,6 +995,10 @@ class BackgroundOrchestrator:
         query = select(Position).order_by(Position.updated_at.desc()).limit(limit)
         if open_only:
             query = query.where(Position.is_open.is_(True))
+            # Exclude phantom/empty positions that have no real quantity or investment.
+            # These are typically dry-run positions or accounting artefacts that slipped
+            # through before the account-sync cleanup could run.
+            query = query.where(Position.quantity > 0, Position.invested_usd > 0)
 
         rows = (await session.execute(query)).scalars().all()
         result = [
@@ -998,12 +1052,15 @@ class BackgroundOrchestrator:
         ).scalars().all()
         cache: dict[str, MarketInfo] = {c.market_id: c for c in cached_rows}
 
-        # 3. Find missing / stale entries (TTL 24 h)
+        # 3. Find missing / stale entries (TTL 24 h) or entries with empty question
+        #    (can happen when Gamma API previously returned an unhandled list response)
         now = datetime.now(tz=timezone.utc)
         ttl = timedelta(hours=24)
         to_fetch = [
             mid for mid in market_ids
-            if mid not in cache or (now - cache[mid].fetched_at) > ttl
+            if mid not in cache
+            or not cache[mid].question          # empty from a previous failed fetch
+            or (now - cache[mid].fetched_at) > ttl
         ]
 
         # 4. Fetch from Gamma API with concurrency limit

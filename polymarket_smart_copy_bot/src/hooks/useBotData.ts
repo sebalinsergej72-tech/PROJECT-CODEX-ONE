@@ -24,7 +24,7 @@ export function useBotTrades(refreshMs = 5000) {
 export function useBotPositions(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-positions"],
-    queryFn: () => fetchPositions(25),
+    queryFn: () => fetchPositions(50),
     refetchInterval: refreshMs,
     retry: 1,
   });

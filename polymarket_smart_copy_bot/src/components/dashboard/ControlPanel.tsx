@@ -193,6 +193,20 @@ export function ControlPanel({ status }: Props) {
           disabled={mutate.isPending}
           onClick={() => act("/control/orders/cleanup", {}, "Очистка завершена")}
         />
+        <ControlButton
+          icon={Trash2}
+          label="Purge Positions"
+          variant="loss"
+          disabled={dry || mutate.isPending}
+          onClick={() =>
+            act(
+              "/control/positions/purge",
+              {},
+              "Устаревшие позиции удалены",
+              "Удалить все позиции, не подтверждённые Polymarket? Это закроет dry-run остатки.",
+            )
+          }
+        />
 
         <div className="ml-auto">
           <button

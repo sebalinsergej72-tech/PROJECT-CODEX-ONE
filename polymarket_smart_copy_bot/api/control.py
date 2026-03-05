@@ -201,6 +201,21 @@ async def control_stale_orders_cleanup(
     return {"status": "ok", **result}
 
 
+@router.post("/control/positions/purge")
+async def control_purge_positions(
+    request: Request,
+    x_dashboard_token: str | None = Header(default=None),
+) -> dict:
+    """Close all DB open positions not confirmed by the current Polymarket account.
+
+    Useful for removing dry-run leftovers or orphaned positions after a mode switch.
+    """
+    _assert_write_access(x_dashboard_token)
+    orchestrator = _get_orchestrator(request)
+    result = await orchestrator.purge_stale_positions()
+    return {"status": "ok", **result}
+
+
 @router.post("/control/positions/{position_id}/close")
 async def control_close_position(
     position_id: int,
