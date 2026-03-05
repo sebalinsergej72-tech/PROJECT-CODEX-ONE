@@ -45,9 +45,12 @@ export interface BotStatus {
   last_discovery_stats?: DiscoveryStats;
   seed_wallets?: {
     total: number;
-    qualified: number;
-    rejected: number;
-    reject_reasons: Record<string, number>;
+    enabled: number;
+    disabled: number;
+    avg_score: number;
+    avg_win_rate: number;
+    avg_profit_factor: number;
+    disable_reasons: Record<string, number>;
   };
   account_balances?: {
     source: string;

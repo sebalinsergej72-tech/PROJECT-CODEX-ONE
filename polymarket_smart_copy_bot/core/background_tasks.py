@@ -915,31 +915,48 @@ class BackgroundOrchestrator:
         }
 
     async def _get_seed_wallets_stats(self) -> dict:
-        """Query WalletScore table for seed wallet scoring stats."""
+        """Query QualifiedWallet table for wallet scoring stats."""
         try:
+            from models.qualified_wallet import QualifiedWallet
             async with AsyncSessionFactory() as session:
-                rows = (await session.execute(select(WalletScore))).scalars().all()
+                rows = (await session.execute(select(QualifiedWallet))).scalars().all()
                 total = len(rows)
-                qualified = sum(1 for r in rows if r.qualified)
-                rejected = total - qualified
-                # Collect rejection reasons
+                enabled = sum(1 for r in rows if r.enabled)
+                disabled = total - enabled
+
+                # Score distribution for enabled wallets
+                scores = [r.score for r in rows if r.enabled]
+                avg_score = sum(scores) / len(scores) if scores else 0.0
+                avg_wr = sum(r.win_rate for r in rows if r.enabled) / enabled if enabled else 0.0
+                avg_pf = sum(r.profit_factor for r in rows if r.enabled) / enabled if enabled else 0.0
+
+                # Metric ranges for rejected/disabled wallets
                 reasons: dict[str, int] = {}
                 for r in rows:
-                    if not r.qualified and r.reason:
-                        reasons[r.reason] = reasons.get(r.reason, 0) + 1
-                # Top 5 reasons sorted by count
-                top_reasons = dict(
-                    sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:5]
-                )
+                    if not r.enabled:
+                        if r.win_rate < 0.58:
+                            reasons["low_win_rate"] = reasons.get("low_win_rate", 0) + 1
+                        elif r.trades_90d < 80:
+                            reasons["low_trades"] = reasons.get("low_trades", 0) + 1
+                        elif r.profit_factor < 1.40:
+                            reasons["low_pf"] = reasons.get("low_pf", 0) + 1
+                        elif r.avg_size < 250:
+                            reasons["low_avg_size"] = reasons.get("low_avg_size", 0) + 1
+                        else:
+                            reasons["other"] = reasons.get("other", 0) + 1
+
                 return {
                     "total": total,
-                    "qualified": qualified,
-                    "rejected": rejected,
-                    "reject_reasons": top_reasons,
+                    "enabled": enabled,
+                    "disabled": disabled,
+                    "avg_score": round(avg_score, 4),
+                    "avg_win_rate": round(avg_wr, 4),
+                    "avg_profit_factor": round(avg_pf, 4),
+                    "disable_reasons": reasons,
                 }
         except Exception:
             logger.exception("Failed to get seed wallet stats")
-            return {"total": 0, "qualified": 0, "rejected": 0, "reject_reasons": {}}
+            return {"total": 0, "enabled": 0, "disabled": 0, "avg_score": 0, "avg_win_rate": 0, "avg_profit_factor": 0, "disable_reasons": {}}
 
     async def get_pnl_status(self) -> dict:
         await self._refresh_portfolio_state_from_db()

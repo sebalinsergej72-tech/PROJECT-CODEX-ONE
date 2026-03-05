@@ -17,10 +17,13 @@ export function DiscoveryDiag({ status }: Props) {
     .slice(0, 5);
 
   const seed = status.seed_wallets;
-  const seedTotal = seed?.total || 0;
-  const seedQualified = seed?.qualified || 0;
-  const seedRejected = seed?.rejected || 0;
-  const seedReasons = Object.entries(seed?.reject_reasons || {})
+  const seedTotal = seed?.total ?? 0;
+  const seedEnabled = seed?.enabled ?? 0;
+  const seedDisabled = seed?.disabled ?? 0;
+  const seedAvgScore = seed?.avg_score ?? 0;
+  const seedAvgWR = seed?.avg_win_rate ?? 0;
+  const seedAvgPF = seed?.avg_profit_factor ?? 0;
+  const seedReasons = Object.entries(seed?.disable_reasons || {})
     .sort((a, b) => Number(b[1]) - Number(a[1]))
     .slice(0, 5);
 
@@ -55,29 +58,41 @@ export function DiscoveryDiag({ status }: Props) {
         </div>
       </div>
 
-      {/* Seed wallets section */}
-      {seedTotal > 0 ? (
-        <div>
-          <div className="mb-2 flex items-center gap-2">
-            <Wallet className="h-3.5 w-3.5 text-muted-foreground" />
-            <h3 className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-              Seed Wallets — wallets.yaml
-            </h3>
-          </div>
+      {/* Qualified Wallets section — always show */}
+      <div>
+        <div className="mb-2 flex items-center gap-2">
+          <Wallet className="h-3.5 w-3.5 text-muted-foreground" />
+          <h3 className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+            Qualified Wallets Pool
+          </h3>
+        </div>
+        {seedTotal > 0 ? (
           <div className="flex flex-wrap items-center gap-3 font-mono text-sm">
             <span className="text-muted-foreground">
               total=<span className="font-bold text-foreground">{seedTotal}</span>
             </span>
             <span className="text-muted-foreground">
-              qualified=<span className={`font-bold ${seedQualified > 0 ? "text-profit" : "text-loss"}`}>{seedQualified}</span>
+              enabled=<span className={`font-bold ${seedEnabled > 0 ? "text-profit" : "text-loss"}`}>{seedEnabled}</span>
+            </span>
+            {seedDisabled > 0 ? (
+              <span className="text-muted-foreground">
+                disabled=<span className="font-bold text-warning">{seedDisabled}</span>
+              </span>
+            ) : null}
+            <span className="text-border">|</span>
+            <span className="text-muted-foreground">
+              avg score=<span className="font-bold text-foreground">{seedAvgScore.toFixed(3)}</span>
             </span>
             <span className="text-muted-foreground">
-              rejected=<span className={`font-bold ${seedRejected > 0 ? "text-warning" : "text-muted-foreground"}`}>{seedRejected}</span>
+              WR=<span className="font-bold text-foreground">{(seedAvgWR * 100).toFixed(1)}%</span>
+            </span>
+            <span className="text-muted-foreground">
+              PF=<span className="font-bold text-foreground">{seedAvgPF.toFixed(2)}</span>
             </span>
             {seedReasons.length > 0 ? (
               <>
                 <span className="text-border">|</span>
-                <span className="text-muted-foreground">reasons:</span>
+                <span className="text-muted-foreground">disabled:</span>
                 {seedReasons.map(([k, v]) => (
                   <span key={k} className="rounded bg-warning/10 px-1.5 py-0.5 text-xs text-warning">
                     {k}={v}
@@ -86,8 +101,10 @@ export function DiscoveryDiag({ status }: Props) {
               </>
             ) : null}
           </div>
-        </div>
-      ) : null}
+        ) : (
+          <span className="font-mono text-sm text-muted-foreground">No wallet data yet</span>
+        )}
+      </div>
     </div>
   );
 }
