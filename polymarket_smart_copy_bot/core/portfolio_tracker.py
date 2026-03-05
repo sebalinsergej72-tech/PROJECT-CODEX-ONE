@@ -58,6 +58,12 @@ class PortfolioTracker:
             self._market_token_key(row.market_id, row.token_id)
             for row in remote
         }
+        # Fallback lookup for positions whose token_id was not stored in DB:
+        # match by (market_id, outcome) so they aren't incorrectly closed.
+        remote_market_outcome = {
+            f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
+            for row in remote
+        }
 
         local_rows = (
             await session.execute(
@@ -135,6 +141,11 @@ class PortfolioTracker:
             key = self._position_key(row.market_id, row.token_id, row.outcome)
             if key in remote_by_key:
                 continue
+            # Fallback: if token_id is missing, match by market_id + outcome only
+            if not row.token_id:
+                mo_key = f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
+                if mo_key in remote_market_outcome:
+                    continue
             row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
             row.unrealized_pnl_usd = 0.0
             row.is_open = False
@@ -155,6 +166,11 @@ class PortfolioTracker:
             mt_key = self._market_token_key(row.market_id, row.token_id)
             if mt_key in remote_market_token:
                 continue
+            # Fallback: if token_id is missing, match by market_id + outcome only
+            if not row.token_id:
+                mo_key = f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
+                if mo_key in remote_market_outcome:
+                    continue
             row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
             row.unrealized_pnl_usd = 0.0
             row.is_open = False

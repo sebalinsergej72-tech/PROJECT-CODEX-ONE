@@ -389,16 +389,16 @@ class BackgroundOrchestrator:
         self.last_trade_scan_at = datetime.now(tz=timezone.utc)
 
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
-        await self.portfolio_tracker.sync_account_open_positions(session)
-        await self.portfolio_tracker.mark_to_market(session)
-
-        # Refresh capital_base from live API balance on every portfolio sync
-        # (not only during the hourly capital_recalc job) so that equity
-        # calculations stay accurate immediately after trades execute.
+        # Fetch live balance FIRST so that the CLOB client gets initialised before
+        # sync_account_open_positions is called.  Without this, _resolve_account_address()
+        # can return None on the very first cycle and the position reconciliation is skipped.
         if not self._dry_run:
             api_balance = await self.polymarket_client.fetch_account_balance_usd()
             if api_balance is not None and api_balance > 0:
                 await self.portfolio_tracker.update_capital_base(session, api_balance)
+
+        await self.portfolio_tracker.sync_account_open_positions(session)
+        await self.portfolio_tracker.mark_to_market(session)
 
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
         self.last_portfolio_refresh_at = datetime.now(tz=timezone.utc)
@@ -839,11 +839,17 @@ class BackgroundOrchestrator:
         if remote is None:
             return {"ok": False, "reason": "api_unavailable", "purged": 0}
 
+        # Build two lookup sets:
+        # 1. Exact: market_id | token_id | outcome
+        # 2. Fallback: market_id | outcome  (used when local token_id is None)
         remote_keys: set[str] = set()
+        remote_market_outcome_keys: set[str] = set()
         for rp in remote:
             token = (rp.token_id or "").strip().lower()
             key = f"{rp.market_id.strip().lower()}|{token}|{rp.outcome.strip().lower()}"
             remote_keys.add(key)
+            mo_key = f"{rp.market_id.strip().lower()}|{rp.outcome.strip().lower()}"
+            remote_market_outcome_keys.add(mo_key)
 
         # If Polymarket returned zero positions, only purge when we explicitly know
         # the account is empty (remote is an empty list, not None which means failure).
@@ -860,6 +866,13 @@ class BackgroundOrchestrator:
                 key = f"{row.market_id.strip().lower()}|{token}|{row.outcome.strip().lower()}"
                 if key in remote_keys:
                     continue
+                # Fallback: if local token_id is None, match by market_id + outcome only.
+                # This prevents purging positions whose token_id was never persisted to DB
+                # but which still exist on Polymarket under the same market/outcome.
+                if not row.token_id:
+                    mo_key = f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
+                    if mo_key in remote_market_outcome_keys:
+                        continue
                 row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
                 row.unrealized_pnl_usd = 0.0
                 row.is_open = False

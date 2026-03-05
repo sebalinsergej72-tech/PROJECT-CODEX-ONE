@@ -1101,5 +1101,27 @@ class PolymarketClient:
             try:
                 return self._normalize_address(self._clob_client.signer.address())
             except Exception:
-                return None
+                pass
+
+        # Fallback: derive EOA address directly from the private key without going
+        # through the full CLOB credential setup (which requires a network call).
+        # ClobClient.__init__ is pure-local (no network) and creates the signer.
+        if settings.polymarket_private_key:
+            try:
+                from py_clob_client.client import ClobClient
+                from py_order_utils.model import EOA
+
+                _tmp = ClobClient(
+                    settings.polymarket_host,
+                    key=settings.polymarket_private_key,
+                    chain_id=settings.polymarket_chain_id,
+                    signature_type=EOA,
+                )
+                addr = self._normalize_address(_tmp.signer.address())
+                if addr:
+                    logger.debug("Resolved account address from private key: {}", addr)
+                return addr
+            except Exception as exc:
+                logger.warning("Could not derive account address from private key: {}", exc)
+
         return None
