@@ -189,7 +189,7 @@ class TradeExecutor:
         # Persist the bot-calculated intended size even if execution later fails.
         copied_trade.size_usd = target_size_usd
 
-        # SAFETY: safe aggressive fill — determine order type and execution price
+        # SAFETY: IOC + controlled slippage — determine order type and execution price
         is_aggressive_fill = fill_mode == "aggressive" and not is_mirror_close
         order_type = "GTC"  # default conservative
         execution_price_cents = intent.source_price_cents
@@ -220,9 +220,11 @@ class TradeExecutor:
                 )
                 return
 
-            order_type = "FOK"  # SAFETY: safe aggressive fill — Fill-Or-Kill
+            # IMPROVED: flexible fill mode — IOC (default) or FOK
+            order_type = settings.aggressive_fill_type.upper()  # "IOC" or "FOK"
             logger.info(
-                "Aggressive fill: {} {} price={:.2f}c exec_price={:.2f}c slippage={:.1f}bps",
+                "Aggressive fill [{}]: {} {} price={:.2f}c exec_price={:.2f}c slippage={:.1f}bps",
+                order_type,
                 intent.market_id,
                 intent.side.upper(),
                 intent.source_price_cents,
@@ -230,7 +232,7 @@ class TradeExecutor:
                 slippage_bps,
             )
 
-        # IMPROVED: status model — record fill mode and TTL
+        # IMPROVED: flexible fill mode — record fill mode and TTL
         copied_trade.fill_mode = fill_mode
         copied_trade.submitted_at = now
         if is_aggressive_fill:
@@ -272,88 +274,38 @@ class TradeExecutor:
             )
             return
 
-        # IMPROVED: status model — store order_id, set SUBMITTED (not EXECUTED)
+        # IMPROVED: flexible fill mode — store order_id
         copied_trade.order_id = result.order_id
         copied_trade.tx_hash = result.tx_hash
 
-        if is_aggressive_fill:
-            # FOK orders fill instantly or not at all — treat success as FILLED
-            copied_trade.status = TradeStatus.FILLED.value
-            copied_trade.filled_at = datetime.now(tz=timezone.utc)
-            copied_trade.filled_size_usd = target_size_usd
-            copied_trade.filled_price_cents = execution_price_cents
-
-            # Calculate and log actual slippage
-            _, actual_slippage_bps = self.risk_manager.can_accept_slippage(
-                source_price_cents=intent.source_price_cents,
-                execution_price_cents=execution_price_cents,
-                max_allowed_bps=settings.max_allowed_slippage_bps,
+        # SAFETY: IOC + controlled slippage — all order types go to SUBMITTED
+        # IOC orders may partially fill, so we always defer to fill monitor for confirmation.
+        # FOK is kept as fallback: if used, the fill monitor will confirm instantly.
+        copied_trade.status = TradeStatus.SUBMITTED.value
+        if is_mirror_close:
+            copied_trade.reason = (
+                f"submitted_{order_type.lower()} mirror_close mode={risk_mode}"
             )
-            copied_trade.slippage_bps = actual_slippage_bps
-
-            if is_mirror_close:
-                copied_trade.reason = f"filled_fok mirror_close mode={risk_mode} slippage={actual_slippage_bps:+.1f}bps"
-            else:
-                copied_trade.reason = (
-                    f"filled_fok mode={risk_mode} mult={wallet_multiplier:.2f} "
-                    f"kelly={kelly_fraction:.3f} slippage={actual_slippage_bps:+.1f}bps"
-                )
-
-            # SAFETY: safe aggressive fill — detailed fill log
-            logger.info(
-                "Filled at {:.2f}c (slippage {:+.1f} bps) | {} {} ${:.2f} [FOK]",
-                execution_price_cents,
-                actual_slippage_bps,
-                intent.market_id,
-                intent.side.upper(),
-                target_size_usd,
-            )
-
-            await self._upsert_position(session, intent, target_size_usd)
         else:
-            # IMPROVED: status model — GTC orders need fill polling
-            copied_trade.status = TradeStatus.SUBMITTED.value
-            if is_mirror_close:
-                copied_trade.reason = f"submitted_gtc mirror_close mode={risk_mode}"
-            else:
-                copied_trade.reason = (
-                    f"submitted_gtc mode={risk_mode} mult={wallet_multiplier:.2f} kelly={kelly_fraction:.3f}"
-                )
-
-            logger.info(
-                "Order submitted (GTC, awaiting fill) | {} {} ${:.2f} order_id={}",
-                intent.market_id,
-                intent.side.upper(),
-                target_size_usd,
-                result.order_id,
+            copied_trade.reason = (
+                f"submitted_{order_type.lower()} mode={risk_mode} mult={wallet_multiplier:.2f} kelly={kelly_fraction:.3f}"
             )
 
-            # NOTE: position upsert deferred to order fill monitor background job
+        logger.info(
+            "Order submitted ({}, awaiting fill) | {} {} ${:.2f} order_id={}",
+            order_type,
+            intent.market_id,
+            intent.side.upper(),
+            target_size_usd,
+            result.order_id,
+        )
 
-        # Post-check only for confirmed fills
-        if copied_trade.status == TradeStatus.FILLED.value:
-            post_check = await self._post_check_market_position_cap(
-                session=session,
-                intent=intent,
-                executed_size_usd=target_size_usd,
-                portfolio_state=portfolio_state,
-                risk_mode=risk_mode,
-            )
-            if post_check.exceeded:
-                overflow_note = (
-                    f"postcheck_exceeded market={intent.market_id} "
-                    f"exposure=${post_check.market_exposure_usd:.2f} cap=${post_check.market_cap_usd:.2f} "
-                    f"overflow=${post_check.overflow_usd:.2f} trimmed=${post_check.trimmed_usd:.2f}"
-                )
-                if post_check.trim_error:
-                    overflow_note = f"{overflow_note} trim_error={post_check.trim_error}"
-                copied_trade.reason = f"{copied_trade.reason} | {overflow_note}"
-                logger.error("{}", overflow_note)
-                await self.notifications.send_message(f"[RISK] {overflow_note}")
+        # NOTE: position upsert deferred to order fill monitor background job
+        # This ensures we only create positions for confirmed fills (full or partial)
 
-        status_label = "FILLED" if copied_trade.status == TradeStatus.FILLED.value else "SUBMITTED"
+        status_label = "SUBMITTED"
         await self.notifications.send_message(
-            f"[{status_label}:{risk_mode}:{fill_mode}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
+            f"[{status_label}:{risk_mode}:{fill_mode}:{order_type}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
             f"${target_size_usd:.2f} (mult={wallet_multiplier:.2f}, kelly={kelly_fraction:.3f})"
         )
 

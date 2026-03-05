@@ -731,8 +731,9 @@ class PolymarketClient:
         price_decimal = max(min(request.price_cents / 100, 0.999), 0.001)
         size = max(request.size_usd / price_decimal, 1.0)
 
-        # IMPROVED: status model — support FOK order type for aggressive fills
-        clob_order_type = OrderType.FOK if request.order_type == "FOK" else OrderType.GTC
+        # IMPROVED: flexible fill mode — support IOC (FAK) and FOK order types
+        _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
+        clob_order_type = _order_type_map.get(request.order_type, OrderType.GTC)
 
         order_args = OrderArgs(
             token_id=request.token_id,

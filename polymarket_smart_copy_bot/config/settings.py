@@ -50,10 +50,11 @@ class Settings(BaseSettings):
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
 
-    # SAFETY: safe aggressive fill — slippage & TTL settings
+    # SAFETY: IOC + controlled slippage — fill mode settings
     fill_mode: FillMode = Field(default="conservative", alias="FILL_MODE")
-    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")                   # +0.5% default
-    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")   # hard cap
+    aggressive_fill_type: str = Field(default="IOC", alias="AGGRESSIVE_FILL_TYPE")            # IOC or FOK
+    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")                   # +0.05% default
+    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")   # hard cap 0.15%
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")  # 2 minutes
 
     # Legacy/conservative defaults
