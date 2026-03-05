@@ -309,6 +309,11 @@ class BackgroundOrchestrator:
             await self._in_session("seed_wallets", self._seed_wallets)
             await self._run_wallet_discovery_job()
             await self._run_portfolio_refresh_job()
+            # Purge stale positions on every startup to clean up any
+            # ghost positions (e.g. from dry-run mode) that the regular
+            # sync cycle might have missed.
+            if not self._dry_run:
+                await self.purge_stale_positions()
             await self._run_capital_recalc_job()
             await self._run_trade_monitor_job()
             await self._run_stale_order_cleanup_job()
@@ -866,13 +871,15 @@ class BackgroundOrchestrator:
                 key = f"{row.market_id.strip().lower()}|{token}|{row.outcome.strip().lower()}"
                 if key in remote_keys:
                     continue
-                # Fallback: if local token_id is None, match by market_id + outcome only.
-                # This prevents purging positions whose token_id was never persisted to DB
-                # but which still exist on Polymarket under the same market/outcome.
-                if not row.token_id:
+                # For account_sync positions with missing token_id, use the
+                # (market_id, outcome) fallback to avoid purging positions whose
+                # token_id was simply never persisted.
+                if row.wallet_address == "account_sync" and not row.token_id:
                     mo_key = f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
                     if mo_key in remote_market_outcome_keys:
                         continue
+                # For copied positions (non-account_sync), no fallback: if the
+                # exact key doesn't match remote, the position is stale.
                 row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
                 row.unrealized_pnl_usd = 0.0
                 row.is_open = False

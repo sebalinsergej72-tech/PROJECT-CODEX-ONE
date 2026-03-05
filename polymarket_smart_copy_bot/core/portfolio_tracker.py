@@ -51,7 +51,10 @@ class PortfolioTracker:
 
         remote = await self.polymarket_client.fetch_account_open_positions(limit=200)
         if remote is None:
+            logger.warning("Account position sync skipped: fetch_account_open_positions returned None (API failure)")
             return (0, 0)
+
+        logger.debug("Account position sync: {} remote positions fetched from API", len(remote))
 
         remote_by_key = {self._position_key(row.market_id, row.token_id, row.outcome): row for row in remote}
         remote_market_token = {
@@ -166,11 +169,10 @@ class PortfolioTracker:
             mt_key = self._market_token_key(row.market_id, row.token_id)
             if mt_key in remote_market_token:
                 continue
-            # Fallback: if token_id is missing, match by market_id + outcome only
-            if not row.token_id:
-                mo_key = f"{row.market_id.strip().lower()}|{row.outcome.strip().lower()}"
-                if mo_key in remote_market_outcome:
-                    continue
+            # No fallback for copied positions: if the exact market+token key
+            # doesn't match a remote position, the position is stale.
+            # The account_sync row (phase 1/2) already represents the real position;
+            # keeping old copied rows with token_id=None alive causes ghost positions.
             row.realized_pnl_usd = round(row.realized_pnl_usd + row.unrealized_pnl_usd, 4)
             row.unrealized_pnl_usd = 0.0
             row.is_open = False
