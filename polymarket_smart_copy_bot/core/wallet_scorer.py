@@ -234,21 +234,28 @@ class WalletScorer:
 
     @staticmethod
     def _select_wallets_by_mode(metrics: list[WalletMetrics], risk_mode: RiskMode) -> set[str]:
+        # IMPROVED: Safely separate and sort wallets to guarantee qualified ones get priority
         sorted_metrics = sorted(metrics, key=lambda m: m.score, reverse=True)
+        
         qualified = [m for m in sorted_metrics if m.qualified]
+        unqualified = [m for m in sorted_metrics if not m.qualified]
 
         if risk_mode == "aggressive":
-            if len(qualified) < settings.min_wallets_aggressive:
-                top = sorted_metrics[: settings.min_wallets_aggressive]
-            else:
-                top = qualified[: settings.max_wallets_aggressive]
-            return {wallet.wallet.address for wallet in top}
-
-        if len(qualified) < settings.min_qualified_wallets:
-            selected = sorted_metrics[: settings.min_qualified_wallets]
+            min_required = settings.min_wallets_aggressive
+            max_allowed = settings.max_wallets_aggressive
         else:
-            selected = qualified[: settings.max_qualified_wallets]
-        return {wallet.wallet.address for wallet in selected[: settings.max_qualified_wallets]}
+            min_required = settings.min_qualified_wallets
+            max_allowed = settings.max_qualified_wallets
+
+        # 1. Take top qualified wallets up to the maximum limit
+        selected = qualified[:max_allowed]
+
+        # 2. If we haven't reached the minimum required, fallback to the top unqualified wallets
+        shortfall = min_required - len(selected)
+        if shortfall > 0:
+            selected.extend(unqualified[:shortfall])
+
+        return {m.wallet.address for m in selected}
 
     async def _upsert_wallet_score(self, session: AsyncSession, metrics: WalletMetrics) -> WalletScore:
         query = select(WalletScore).where(WalletScore.wallet_address == metrics.wallet.address)
