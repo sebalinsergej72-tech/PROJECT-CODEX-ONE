@@ -11,7 +11,7 @@ from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import RiskMode, settings
+from config.settings import FillMode, RiskMode, settings
 from core.portfolio_tracker import PortfolioTracker
 from core.risk_manager import PortfolioState, RiskManager
 from core.trade_executor import TradeExecutor
@@ -19,7 +19,7 @@ from core.trade_monitor import TradeMonitor
 from core.wallet_discovery import WalletDiscovery
 from data.database import AsyncSessionFactory, get_scheduler_jobstore_url
 from data.polymarket_client import PolymarketClient
-from models.models import BotRuntimeState, CopiedTrade, MarketInfo, Position
+from models.models import BotRuntimeState, CopiedTrade, MarketInfo, Position, TradeStatus
 from utils.notifications import NotificationService
 
 _ORCHESTRATOR_INSTANCE: "BackgroundOrchestrator | None" = None
@@ -61,6 +61,14 @@ async def scheduled_stale_order_cleanup() -> None:
         logger.warning("Stale order cleanup job skipped: orchestrator is not initialized")
         return
     await _ORCHESTRATOR_INSTANCE._run_stale_order_cleanup_job()
+
+
+# IMPROVED: status model — order fill monitoring entrypoint
+async def scheduled_order_fill_monitor() -> None:
+    if _ORCHESTRATOR_INSTANCE is None:
+        logger.warning("Order fill monitor job skipped: orchestrator is not initialized")
+        return
+    await _ORCHESTRATOR_INSTANCE._run_order_fill_monitor_job()
 
 
 class BackgroundOrchestrator:
@@ -287,6 +295,17 @@ class BackgroundOrchestrator:
             max_instances=1,
             misfire_grace_time=120,
         )
+        # IMPROVED: status model — poll submitted orders for fills
+        self.scheduler.add_job(
+            scheduled_order_fill_monitor,
+            trigger="interval",
+            seconds=30,
+            id="order_fill_monitor",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+        )
 
     async def _run_wallet_discovery_job(self) -> None:
         await self._in_session("wallet_discovery", self._wallet_discovery_refresh)
@@ -302,6 +321,9 @@ class BackgroundOrchestrator:
 
     async def _run_stale_order_cleanup_job(self) -> None:
         await self._in_session("stale_order_cleanup", self._stale_order_cleanup)
+
+    async def _run_order_fill_monitor_job(self) -> None:
+        await self._in_session("order_fill_monitor", self._order_fill_monitor)
 
     async def _bootstrap_jobs(self) -> None:
         try:
@@ -386,6 +408,7 @@ class BackgroundOrchestrator:
                 intent,
                 portfolio,
                 risk_mode=self._risk_mode,
+                fill_mode=settings.fill_mode,  # SAFETY: safe aggressive fill
                 price_filter_enabled=self._price_filter_enabled,
                 high_conviction_boost_enabled=self._high_conviction_boost_enabled,
             )
@@ -449,6 +472,125 @@ class BackgroundOrchestrator:
             )
         else:
             logger.debug("Stale order cleanup: scanned={} stale={} cancelled=0 failed=0", scanned, stale)
+
+    # IMPROVED: status model — poll submitted orders for fill confirmation
+    async def _order_fill_monitor(self, session: AsyncSession) -> None:
+        """Check pending GTC orders for fills. Update status and create positions on fill."""
+
+        query = (
+            select(CopiedTrade)
+            .where(CopiedTrade.status.in_([
+                TradeStatus.SUBMITTED.value,
+                TradeStatus.PARTIAL.value,
+            ]))
+            .where(CopiedTrade.order_id.isnot(None))
+        )
+        pending_trades = list((await session.execute(query)).scalars().all())
+        if not pending_trades:
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        filled_count = 0
+        expired_count = 0
+
+        for trade in pending_trades:
+            # Check TTL expiry first
+            if trade.ttl_expires_at and now >= trade.ttl_expires_at:
+                cancelled = await self.polymarket_client.cancel_order(trade.order_id)
+                trade.status = TradeStatus.EXPIRED.value
+                trade.reason = f"{trade.reason or ''} | expired_ttl"
+                expired_count += 1
+                logger.info(
+                    "Order {} expired (TTL) for trade {} | cancelled={}",
+                    trade.order_id,
+                    trade.external_trade_id,
+                    cancelled,
+                )
+                continue
+
+            # Poll order status from CLOB
+            order_data = await self.polymarket_client.get_order_status(trade.order_id)
+            if order_data is None:
+                continue
+
+            order_status = str(order_data.get("status", "")).upper()
+            size_matched = float(order_data.get("size_matched", 0) or order_data.get("sizeMatched", 0) or 0)
+            original_size = float(order_data.get("original_size", 0) or order_data.get("originalSize", 0) or trade.size_usd or 0)
+            price = float(order_data.get("price", 0) or 0)
+
+            if order_status in ("MATCHED", "FILLED", "CLOSED"):
+                trade.status = TradeStatus.FILLED.value
+                trade.filled_at = now
+                trade.filled_size_usd = size_matched if size_matched > 0 else trade.size_usd
+                if price > 0:
+                    from utils.helpers import ensure_price_in_cents
+                    trade.filled_price_cents = ensure_price_in_cents(price)
+                else:
+                    trade.filled_price_cents = trade.price_cents
+
+                # Calculate slippage
+                if trade.price_cents and trade.price_cents > 0 and trade.filled_price_cents:
+                    _, slippage = self.risk_manager.can_accept_slippage(
+                        source_price_cents=trade.price_cents,
+                        execution_price_cents=trade.filled_price_cents,
+                        max_allowed_bps=settings.max_allowed_slippage_bps,
+                    )
+                    trade.slippage_bps = slippage
+                else:
+                    slippage = 0.0
+
+                trade.reason = f"{trade.reason or ''} | filled (slippage {slippage:+.1f}bps)"
+                filled_count += 1
+
+                # SAFETY: safe aggressive fill — detailed fill log
+                logger.info(
+                    "Filled at {:.2f}c (slippage {:+.1f} bps) | {} {} ${:.2f} order_id={} [GTC polled]",
+                    trade.filled_price_cents or 0,
+                    slippage,
+                    trade.market_id,
+                    trade.side.upper() if trade.side else "?",
+                    trade.filled_size_usd or 0,
+                    trade.order_id,
+                )
+
+                # Upsert position for the filled amount
+                from core.trade_monitor import TradeIntent
+                fill_intent = TradeIntent(
+                    external_trade_id=trade.external_trade_id,
+                    wallet_address=trade.wallet_address,
+                    wallet_score=0.0,
+                    wallet_win_rate=0.0,
+                    wallet_profit_factor=1.0,
+                    wallet_avg_position_size=0.0,
+                    market_id=trade.market_id,
+                    token_id=trade.token_id,
+                    outcome=trade.outcome,
+                    side=trade.side,
+                    source_price_cents=trade.filled_price_cents or trade.price_cents,
+                    source_size_usd=trade.filled_size_usd or trade.size_usd,
+                    is_short_term=False,
+                )
+                await self.trade_executor._upsert_position(
+                    session, fill_intent, trade.filled_size_usd or trade.size_usd
+                )
+
+            elif order_status in ("CANCELLED", "CANCELED"):
+                trade.status = TradeStatus.CANCELED.value
+                trade.reason = f"{trade.reason or ''} | cancelled_by_exchange"
+                logger.info("Order {} cancelled by exchange for trade {}", trade.order_id, trade.external_trade_id)
+
+            elif size_matched > 0 and original_size > 0 and size_matched < original_size:
+                trade.status = TradeStatus.PARTIAL.value
+                trade.filled_size_usd = size_matched
+                trade.reason = f"{trade.reason or ''} | partial ({size_matched:.2f}/{original_size:.2f})"
+
+        if filled_count or expired_count:
+            logger.info(
+                "Order fill monitor: {} pending checked, {} filled, {} expired",
+                len(pending_trades),
+                filled_count,
+                expired_count,
+            )
 
     async def _restore_open_positions(self, session: AsyncSession) -> None:
         await self.portfolio_tracker.restore_open_positions(session)

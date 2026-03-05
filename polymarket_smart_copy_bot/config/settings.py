@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 RiskMode = Literal["conservative", "aggressive"]
+FillMode = Literal["conservative", "aggressive"]  # IMPROVED: status model
 
 
 class Settings(BaseSettings):
@@ -48,6 +49,12 @@ class Settings(BaseSettings):
     polymarket_verify_ssl: bool = Field(default=True, alias="POLYMARKET_VERIFY_SSL")
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
+
+    # SAFETY: safe aggressive fill — slippage & TTL settings
+    fill_mode: FillMode = Field(default="conservative", alias="FILL_MODE")
+    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")                   # +0.5% default
+    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")   # hard cap
+    aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")  # 2 minutes
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")

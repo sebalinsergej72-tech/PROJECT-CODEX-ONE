@@ -60,6 +60,7 @@ class OrderRequest:
     size_usd: float
     market_id: str
     outcome: str
+    order_type: str = "GTC"  # IMPROVED: status model — "GTC" or "FOK"
 
 
 @dataclass(slots=True)
@@ -730,6 +731,9 @@ class PolymarketClient:
         price_decimal = max(min(request.price_cents / 100, 0.999), 0.001)
         size = max(request.size_usd / price_decimal, 1.0)
 
+        # IMPROVED: status model — support FOK order type for aggressive fills
+        clob_order_type = OrderType.FOK if request.order_type == "FOK" else OrderType.GTC
+
         order_args = OrderArgs(
             token_id=request.token_id,
             price=price_decimal,
@@ -738,17 +742,17 @@ class PolymarketClient:
         )
         signed_order = clob_client.create_order(order_args)
         try:
-            return clob_client.post_order(signed_order, OrderType.GTC)
+            return clob_client.post_order(signed_order, clob_order_type)
         except Exception as exc:
             text = str(exc).lower()
             if "unauthorized" in text or "invalid api key" in text:
                 # Common operator error: Builder API creds provided instead of user L2 creds.
                 # Fall back to signer-derived user credentials and retry once.
                 self._switch_to_derived_creds(clob_client)
-                return clob_client.post_order(signed_order, OrderType.GTC)
+                return clob_client.post_order(signed_order, clob_order_type)
             if "not enough balance / allowance" in text:
                 self._refresh_collateral_allowance_sync()
-                return clob_client.post_order(signed_order, OrderType.GTC)
+                return clob_client.post_order(signed_order, clob_order_type)
             raise
 
     def _fetch_open_orders_sync(self, market_id: str | None, token_id: str | None) -> list[dict[str, Any]]:
@@ -778,6 +782,36 @@ class PolymarketClient:
                 return False
         # Some endpoints return non-uniform bodies; lack of exception is enough.
         return True
+
+    # IMPROVED: status model — async wrappers for order lifecycle
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single order by ID."""
+        if self._dry_run or not order_id:
+            return True
+        try:
+            return await asyncio.to_thread(self._cancel_order_sync, order_id)
+        except Exception as exc:
+            logger.warning("Failed to cancel order {}: {}", order_id, exc)
+            return False
+
+    async def get_order_status(self, order_id: str) -> dict | None:
+        """Fetch order details from CLOB for fill status polling."""
+        if self._dry_run:
+            return {"status": "FILLED", "orderID": order_id}
+        if not settings.polymarket_private_key or not order_id:
+            return None
+        try:
+            return await asyncio.to_thread(self._get_order_status_sync, order_id)
+        except Exception as exc:
+            logger.warning("Failed to fetch order status for {}: {}", order_id, exc)
+            return None
+
+    def _get_order_status_sync(self, order_id: str) -> dict | None:
+        clob_client = self._ensure_clob_client()
+        response = clob_client.get_order(order_id)
+        if isinstance(response, dict):
+            return response
+        return None
 
     def _fetch_account_balance_sync(self) -> float | None:
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
