@@ -132,8 +132,10 @@ class WalletScorer:
             win_rate = 0.0
             profit_factor = 0.0
 
+        # IMPROVED: Properly calculating active 30-day ROI to reward recent profitability
         total_pnl_30 = sum(p for p in (signal.profit_usd for signal in recent_30) if p is not None)
         roi_30d = total_pnl_30 / total_volume_30 if total_volume_30 > 0 else 0.0
+        
         avg_position_size = total_volume_90 / trade_count_90 if trade_count_90 > 0 else 0.0
 
         score = WalletScorer._score_wallet(
@@ -141,11 +143,13 @@ class WalletScorer:
             trade_count_90d=trade_count_90,
             profit_factor=profit_factor,
             avg_position_size=avg_position_size,
+            roi_30d=roi_30d,
             base_weight=wallet.base_weight,
         )
 
         qualified, reason = WalletScorer._qualified_reason(
             win_rate=win_rate,
+            trade_count_30d=trade_count_30,
             trade_count_90d=trade_count_90,
             profit_factor=profit_factor,
             avg_position_size=avg_position_size,
@@ -174,17 +178,24 @@ class WalletScorer:
         trade_count_90d: int,
         profit_factor: float,
         avg_position_size: float,
+        roi_30d: float,
         base_weight: float,
     ) -> float:
+        # IMPROVED: Scaled to more realistic Polymarket performance bounds
         win_component = min(max((win_rate - 0.5) / 0.3, 0.0), 1.0)
-        trade_component = min(trade_count_90d / 260, 1.0)
-        pf_component = min(max((profit_factor - 1.0) / 1.4, 0.0), 1.0)
-        size_component = min(avg_position_size / 1200, 1.0)
+        trade_component = min(trade_count_90d / 200, 1.0)
+        pf_component = min(max((profit_factor - 1.0) / 1.0, 0.0), 1.0)
+        size_component = min(avg_position_size / 1000, 1.0)
+        
+        # IMPROVED: Explicit 30-day ROI component (up to 50% ROI yields max component score)
+        roi_component = min(max(roi_30d / 0.50, 0.0), 1.0)
 
+        # IMPROVED: Re-balanced weights to sum exactly to 1.0
         raw = (
-            0.35 * win_component
-            + 0.25 * trade_component
+            0.30 * win_component
             + 0.30 * pf_component
+            + 0.15 * trade_component
+            + 0.15 * roi_component
             + 0.10 * size_component
         )
         return raw * base_weight
@@ -193,21 +204,32 @@ class WalletScorer:
     def _qualified_reason(
         *,
         win_rate: float,
+        trade_count_30d: int,
         trade_count_90d: int,
         profit_factor: float,
         avg_position_size: float,
         score: float,
     ) -> tuple[bool, str]:
-        if win_rate < 0.68:
-            return False, "win_rate_below_68pct"
-        if trade_count_90d < 180:
-            return False, "trade_count_below_180_90d"
-        if profit_factor < 1.8:
-            return False, "profit_factor_below_1_8"
-        if avg_position_size <= 600:
-            return False, "avg_position_below_600"
-        if score < 0.62:
-            return False, "score_below_0_62"
+        # IMPROVED: Adjusted qualification thresholds to realistically fit Polymarket trader distributions
+        if win_rate < 0.53:
+            return False, "win_rate_below_53pct"
+            
+        # IMPROVED: Strict protection against "one-hit wonders" (requires verified recent 30d activity)
+        if trade_count_30d < 10:
+            return False, "too_inactive_recently_30d"
+            
+        if trade_count_90d < 30:
+            return False, "trade_count_below_30_90d"
+            
+        if profit_factor < 1.15:
+            return False, "profit_factor_below_1_15"
+            
+        if avg_position_size <= 100:
+            return False, "avg_position_below_100"
+            
+        if score < 0.40:
+            return False, "score_below_0_40"
+            
         return True, "qualified"
 
     @staticmethod
@@ -216,9 +238,10 @@ class WalletScorer:
         qualified = [m for m in sorted_metrics if m.qualified]
 
         if risk_mode == "aggressive":
-            top = qualified[: settings.max_wallets_aggressive]
-            if len(top) < settings.min_wallets_aggressive:
+            if len(qualified) < settings.min_wallets_aggressive:
                 top = sorted_metrics[: settings.min_wallets_aggressive]
+            else:
+                top = qualified[: settings.max_wallets_aggressive]
             return {wallet.wallet.address for wallet in top}
 
         if len(qualified) < settings.min_qualified_wallets:
