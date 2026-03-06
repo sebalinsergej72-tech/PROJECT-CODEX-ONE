@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     )
     discovery_min_avg_size_aggressive: float = Field(default=350.0, alias="DISCOVERY_MIN_AVG_SIZE_AGGRESSIVE")
     discovery_max_consec_losses_aggressive: int = Field(default=5, alias="DISCOVERY_MAX_CONSEC_LOSSES_AGGRESSIVE")
-    discovery_min_wallet_age_aggressive: int = Field(default=14, alias="DISCOVERY_MIN_WALLET_AGE_AGGRESSIVE")
+    discovery_min_wallet_age_aggressive: int = Field(default=7, alias="DISCOVERY_MIN_WALLET_AGE_AGGRESSIVE")
 
     # Conservative
     discovery_min_trades_cons: int = Field(default=160, alias="DISCOVERY_MIN_TRADES_CONS")
