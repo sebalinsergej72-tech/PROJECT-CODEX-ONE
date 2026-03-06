@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import Any
 
 from loguru import logger
@@ -80,6 +81,7 @@ class CandidateProgress:
     passed_recency: bool = False
     passed_consecutive_losses: bool = False
     passed_wallet_age: bool = False
+    passed_pnl_consistency: bool = False
 
 
 @dataclass(slots=True)
@@ -92,6 +94,7 @@ class DiscoveryCounters:
     passed_recency: int = 0
     passed_consecutive_losses: int = 0
     passed_wallet_age: int = 0
+    passed_pnl_consistency: int = 0
     passed_all_filters: int = 0
 
 
@@ -267,6 +270,7 @@ class WalletDiscovery:
             f"• Passed recency: {counters.passed_recency}\n"
             f"• Passed consecutive_losses: {counters.passed_consecutive_losses}\n"
             f"• Passed wallet_age: {counters.passed_wallet_age}\n"
+            f"• Passed pnl_consistency: {counters.passed_pnl_consistency}\n"
             f"• Passed all filters: {counters.passed_all_filters}\n"
             f"• Enabled for trading: {payload.enabled_wallets}"
         )
@@ -435,6 +439,8 @@ class WalletDiscovery:
                 counters.passed_consecutive_losses += 1
             if progress.passed_wallet_age:
                 counters.passed_wallet_age += 1
+            if progress.passed_pnl_consistency:
+                counters.passed_pnl_consistency += 1
 
             if wallet is not None:
                 scored.append(wallet)
@@ -558,6 +564,14 @@ class WalletDiscovery:
         if wallet_age_days < thresholds.min_wallet_age_days:
             return None, "min_wallet_age_days", progress
         progress.passed_wallet_age = True
+
+        # SAFETY: detect lottery traders — median(pnl) < 0 with positive mean
+        if len(pnl_90d) >= 10:
+            median_pnl = median(pnl_90d)
+            mean_pnl = sum(pnl_90d) / len(pnl_90d)
+            if median_pnl < 0 and mean_pnl > 0:
+                return None, "lottery_trader_median_negative", progress
+        progress.passed_pnl_consistency = True
 
         pnl_30d = sum(trade.pnl_usd for trade in trades_30d if trade.pnl_usd is not None)
         volume_30d = sum(trade.size_usd for trade in trades_30d)

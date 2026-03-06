@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from statistics import median
 
 import yaml
 from loguru import logger
@@ -172,6 +173,7 @@ class WalletScorer:
             account_age_days=account_age_days,
             consecutive_losses=consecutive_losses,
             score=score,
+            pnl_values_90d=pnl_known_90,
         )
 
         return WalletMetrics(
@@ -232,6 +234,7 @@ class WalletScorer:
         account_age_days: int,
         consecutive_losses: int,
         score: float,
+        pnl_values_90d: list[float] | None = None,
     ) -> tuple[bool, str]:
         # SAFETY: realistic thresholds — balanced golden mean for Polymarket
         if win_rate < 0.58:
@@ -261,6 +264,13 @@ class WalletScorer:
         # SAFETY: prevent lucky run wallets — max consecutive losses guard
         if consecutive_losses > 5:
             return False, f"consecutive_losses_{consecutive_losses}"
+
+        # SAFETY: detect lottery traders — median(pnl) < 0 with positive mean
+        if pnl_values_90d and len(pnl_values_90d) >= 10:
+            median_pnl = median(pnl_values_90d)
+            mean_pnl = sum(pnl_values_90d) / len(pnl_values_90d)
+            if median_pnl < 0 and mean_pnl > 0:
+                return False, "lottery_trader_median_negative"
 
         if score < 0.40:
             return False, "score_below_0_40"
