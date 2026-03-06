@@ -28,6 +28,7 @@ export async function bootstrapTelegramWebAppAuth() {
     if (!webApp?.initData) return;
 
     try {
+        localStorage.removeItem("bot_api_url");
         const auth = await authenticateTelegramWebApp(webApp.initData);
         if (auth.dashboard_token) {
             localStorage.setItem("dashboard_session_token", auth.dashboard_token);

@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 
 import type { BotStatus } from "@/lib/api";
-import { postControl } from "@/lib/api";
+import { isTelegramWebApp, postControl } from "@/lib/api";
 
 interface Props {
   status: BotStatus | undefined;
@@ -58,6 +58,7 @@ export function ControlPanel({ status }: Props) {
   const [showSettings, setShowSettings] = useState(false);
   const [apiUrl, setApiUrl] = useState(localStorage.getItem("bot_api_url") || "");
   const [token, setToken] = useState(localStorage.getItem("dashboard_write_token") || "");
+  const telegramWebApp = isTelegramWebApp();
 
   const mutate = useMutation({
     mutationFn: ({ path, payload }: { path: string; payload: Record<string, unknown> }) => postControl(path, payload),
@@ -82,7 +83,9 @@ export function ControlPanel({ status }: Props) {
   };
 
   const saveSettings = () => {
-    localStorage.setItem("bot_api_url", apiUrl);
+    if (!telegramWebApp) {
+      localStorage.setItem("bot_api_url", apiUrl);
+    }
     localStorage.setItem("dashboard_write_token", token);
     toast.success("Настройки сохранены");
     setShowSettings(false);
@@ -223,16 +226,18 @@ export function ControlPanel({ status }: Props) {
         <div className="trading-card space-y-3">
           <h3 className="text-sm font-semibold text-foreground">Подключение к боту</h3>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-[11px] uppercase tracking-widest text-muted-foreground">API URL</label>
-              <input
-                type="text"
-                value={apiUrl}
-                onChange={(e) => setApiUrl(e.target.value)}
-                placeholder="https://your-bot.railway.app"
-                className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              />
-            </div>
+            {!telegramWebApp && (
+              <div>
+                <label className="mb-1 block text-[11px] uppercase tracking-widest text-muted-foreground">API URL</label>
+                <input
+                  type="text"
+                  value={apiUrl}
+                  onChange={(e) => setApiUrl(e.target.value)}
+                  placeholder="https://your-bot.railway.app"
+                  className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            )}
             <div>
               <label className="mb-1 block text-[11px] uppercase tracking-widest text-muted-foreground">Write Token</label>
               <input
@@ -244,6 +249,11 @@ export function ControlPanel({ status }: Props) {
               />
             </div>
           </div>
+          {telegramWebApp && (
+            <p className="text-xs text-muted-foreground">
+              В Telegram WebApp API URL фиксируется по текущему домену dashboard и не может быть переопределён локально.
+            </p>
+          )}
           <button
             onClick={saveSettings}
             className="rounded-lg bg-primary px-4 py-2 text-sm font-bold text-primary-foreground transition-colors hover:bg-primary/90"
