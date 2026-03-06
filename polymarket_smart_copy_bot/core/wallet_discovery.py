@@ -707,6 +707,20 @@ class WalletDiscovery:
                 value = WalletDiscovery._to_float(payload.get(key))
                 if value > 0:
                     return value
+
+        # Polymarket leaderboard doesn't provide profitFactor directly.
+        # Estimate from PnL/volume: gross_profit = (vol+pnl)/2, gross_loss = (vol-pnl)/2
+        # profit_factor = gross_profit / gross_loss = (vol+pnl) / (vol-pnl)
+        pnl = WalletDiscovery._to_float(payload.get("pnl"))
+        vol = WalletDiscovery._to_float(payload.get("vol"))
+        if vol > 0 and pnl > 0:
+            denominator = vol - pnl
+            if denominator > 0:
+                estimated = (vol + pnl) / denominator
+                return round(min(estimated, 5.0), 4)
+            # All profit, no loss
+            return 5.0
+
         return None
 
     @staticmethod
