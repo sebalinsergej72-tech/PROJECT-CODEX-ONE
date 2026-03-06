@@ -70,12 +70,10 @@ async def lifespan(app: FastAPI):
     startup_status = await orchestrator.get_status()
     discovery = startup_status.get("last_discovery_stats", {})
     logger.info(
-        "Startup discovery status | candidates={} passed_all={} enabled={} fallback={} ({})",
+        "Startup discovery status | candidates={} passed_all={} enabled={}",
         discovery.get("total_candidates", 0),
         discovery.get("passed_all_filters", 0),
         discovery.get("enabled_wallets", 0),
-        discovery.get("used_seed_fallback", False),
-        discovery.get("seed_fallback_wallets", 0),
     )
 
     try:
@@ -119,12 +117,10 @@ async def run_worker() -> None:
     startup_status = await orchestrator.get_status()
     discovery = startup_status.get("last_discovery_stats", {})
     logger.info(
-        "Worker startup discovery status | candidates={} passed_all={} enabled={} fallback={} ({})",
+        "Worker startup discovery status | candidates={} passed_all={} enabled={}",
         discovery.get("total_candidates", 0),
         discovery.get("passed_all_filters", 0),
         discovery.get("enabled_wallets", 0),
-        discovery.get("used_seed_fallback", False),
-        discovery.get("seed_fallback_wallets", 0),
     )
 
     stop_event = asyncio.Event()
