@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -281,3 +282,118 @@ def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:
         assert "awaiting_fill_monitor" in (row.reason or "")
 
     asyncio.run(_run_with_session(_case))
+
+
+def test_execute_copy_trade_skips_sell_without_confirmed_position() -> None:
+    class _DummyPolymarketClient:
+        async def place_order(self, request):
+            raise AssertionError("sell without confirmed position should not place a live order")
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        def evaluate_trade(self, **kwargs):
+            raise AssertionError("sell without confirmed position should short-circuit before risk evaluation")
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+        portfolio = PortfolioState(
+            total_equity_usd=100.0,
+            available_cash_usd=100.0,
+            exposure_usd=0.0,
+            daily_pnl_usd=0.0,
+            cumulative_pnl_usd=0.0,
+            open_positions=0,
+        )
+
+        await executor.execute_copy_trade(
+            session,
+            _intent(side="sell", price_cents=60.0, size_usd=7.0),
+            portfolio,
+            risk_mode="aggressive",
+            fill_mode="conservative",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+
+        row = (await session.execute(select(CopiedTrade))).scalar_one()
+        assert row.status == TradeStatus.SKIPPED.value
+        assert row.reason == "sell_without_confirmed_position"
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_maybe_reprice_submitted_gtc_buy_replaces_order_once() -> None:
+    class _DummyPolymarketClient:
+        def __init__(self) -> None:
+            self.cancelled_order_ids: list[str] = []
+            self.placed_requests = []
+
+        def is_dry_run(self) -> bool:
+            return False
+
+        async def cancel_order(self, order_id: str) -> bool:
+            self.cancelled_order_ids.append(order_id)
+            return True
+
+        async def place_order(self, request):
+            self.placed_requests.append(request)
+            return type(
+                "OrderResult",
+                (),
+                {"success": True, "order_id": "ord-2", "tx_hash": "tx-2", "error": None},
+            )()
+
+    class _DummyRiskManager:
+        def can_accept_slippage(self, **kwargs):
+            return True, 15.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    client = _DummyPolymarketClient()
+    executor = TradeExecutor(client, _DummyRiskManager(), _DummyNotifications(), _DummyPortfolioTracker())
+    now = datetime.now(tz=timezone.utc)
+    copied_trade = CopiedTrade(
+        external_trade_id="ext-buy-reprice",
+        wallet_address="0xabc",
+        market_id="mkt-1",
+        token_id="tok-1",
+        outcome="Yes",
+        side=TradeSide.BUY.value,
+        price_cents=60.0,
+        size_usd=7.0,
+        status=TradeStatus.SUBMITTED.value,
+        order_id="ord-1",
+        tx_hash="tx-1",
+        submitted_at=now - timedelta(seconds=30),
+        ttl_expires_at=now + timedelta(seconds=30),
+        reason="submitted mode=aggressive type=GTC limit=60.03c slip=5.00bps | awaiting_fill_monitor",
+    )
+
+    repriced = asyncio.run(executor.maybe_reprice_submitted_gtc_buy(copied_trade=copied_trade, now=now))
+
+    assert repriced is True
+    assert client.cancelled_order_ids == ["ord-1"]
+    assert len(client.placed_requests) == 1
+    assert client.placed_requests[0].order_type == "GTC"
+    assert client.placed_requests[0].price_cents == pytest.approx(60.09, rel=1e-6)
+    assert copied_trade.order_id == "ord-2"
+    assert "repriced_once" in (copied_trade.reason or "")

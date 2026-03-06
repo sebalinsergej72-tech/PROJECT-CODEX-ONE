@@ -628,6 +628,8 @@ class BackgroundOrchestrator:
                 trade.status = TradeStatus.PARTIAL.value
                 trade.filled_size_usd = size_matched
                 trade.reason = f"{trade.reason or ''} | partial ({size_matched:.2f}/{original_size:.2f})"
+            elif await self.trade_executor.maybe_reprice_submitted_gtc_buy(copied_trade=trade, now=now):
+                logger.info("Repriced live BUY order for trade {}", trade.external_trade_id)
 
         if filled_count or expired_count:
             logger.info(

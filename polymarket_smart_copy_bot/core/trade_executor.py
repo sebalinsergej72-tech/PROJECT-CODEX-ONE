@@ -125,6 +125,12 @@ class TradeExecutor:
         )
         is_mirror_close = existing_position is not None and existing_position.side != intent_side
 
+        if intent_side == TradeSide.SELL.value and existing_position is None:
+            copied_trade.status = TradeStatus.SKIPPED.value
+            copied_trade.reason = "sell_without_confirmed_position"
+            logger.info("Trade {} skipped: sell_without_confirmed_position", intent.external_trade_id)
+            return
+
         target_size_usd = 0.0
         wallet_multiplier = 1.0
         kelly_fraction = 0.0
@@ -271,7 +277,7 @@ class TradeExecutor:
             )
         elif execution_plan.order_type == "GTC":
             copied_trade.ttl_expires_at = copied_trade.submitted_at + timedelta(
-                seconds=max(60, settings.aggressive_fill_ttl_seconds)
+                seconds=max(30, settings.aggressive_reprice_total_ttl_seconds)
             )
             copied_trade.reason = f"{copied_trade.reason} | awaiting_fill_monitor"
             reconcile_result = FillReconcileResult(
@@ -354,6 +360,71 @@ class TradeExecutor:
                 copied_trade=copied_trade,
                 intent=intent,
             )
+
+    async def maybe_reprice_submitted_gtc_buy(
+        self,
+        *,
+        copied_trade: CopiedTrade,
+        now: datetime,
+    ) -> bool:
+        """Reprice one live aggressive BUY order once within the existing hard cap."""
+
+        if self.polymarket_client.is_dry_run():
+            return False
+        if copied_trade.status != TradeStatus.SUBMITTED.value:
+            return False
+        if copied_trade.side != TradeSide.BUY.value:
+            return False
+        if not copied_trade.order_id or not copied_trade.token_id or not copied_trade.submitted_at:
+            return False
+        if float(copied_trade.filled_size_usd or 0.0) > 0 or float(copied_trade.filled_quantity or 0.0) > 0:
+            return False
+
+        reason_text = copied_trade.reason or ""
+        if "repriced_once" in reason_text:
+            return False
+
+        reprice_after = copied_trade.submitted_at + timedelta(
+            seconds=max(5, settings.aggressive_reprice_delay_seconds)
+        )
+        if now < reprice_after:
+            return False
+        if copied_trade.ttl_expires_at and now >= copied_trade.ttl_expires_at:
+            return False
+
+        reprice_plan = self._build_reprice_plan(copied_trade=copied_trade)
+        if reprice_plan is None:
+            copied_trade.status = TradeStatus.SKIPPED.value
+            copied_trade.reason = f"{reason_text} | reprice_rejected_by_slippage_guard"
+            return True
+
+        cancelled = await self.polymarket_client.cancel_order(copied_trade.order_id)
+        if not cancelled:
+            copied_trade.reason = f"{reason_text} | reprice_cancel_failed"
+            return False
+
+        result = await self.polymarket_client.place_order(reprice_plan.order_request)
+        if not result.success:
+            error_text = str(result.error or "")
+            if error_text.startswith("orderbook_not_found:"):
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "orderbook_not_found"
+            elif error_text == "insufficient_balance_allowance":
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "insufficient_balance_allowance"
+            else:
+                copied_trade.status = TradeStatus.FAILED.value
+                copied_trade.reason = result.error
+            copied_trade.canceled_at = now
+            return True
+
+        copied_trade.order_id = result.order_id
+        copied_trade.tx_hash = result.tx_hash
+        copied_trade.reason = (
+            f"{reason_text} | repriced_once "
+            f"limit={reprice_plan.requested_price_cents:.2f}c slip={reprice_plan.requested_slippage_bps:.2f}bps"
+        )
+        return True
 
     async def mark_canceled_orders(
         self,
@@ -781,6 +852,35 @@ class TradeExecutor:
             fill_price_cents=delta_price_cents or copied_trade.filled_price_cents,
             order_open=order_open,
             latest_fill_at=latest_fill_at,
+        )
+
+    def _build_reprice_plan(self, *, copied_trade: CopiedTrade) -> ExecutionPlan | None:
+        requested_slippage_bps = max(float(settings.max_allowed_slippage_bps), 0.0)
+        requested_price_cents = round(
+            float(copied_trade.price_cents) * (1.0 + (requested_slippage_bps / 10_000.0)),
+            4,
+        )
+        allowed, actual_bps = self.risk_manager.can_accept_slippage(
+            source_price_cents=float(copied_trade.price_cents),
+            execution_price_cents=requested_price_cents,
+            side=TradeSide.BUY.value,
+            risk_mode="aggressive",
+        )
+        if not allowed:
+            return None
+        return ExecutionPlan(
+            order_request=OrderRequest(
+                token_id=copied_trade.token_id or "",
+                side=TradeSide.BUY.value,
+                price_cents=requested_price_cents,
+                size_usd=round(max(float(copied_trade.size_usd or 0.0), 0.01), 2),
+                market_id=copied_trade.market_id,
+                outcome=copied_trade.outcome,
+                order_type="GTC",
+            ),
+            requested_price_cents=requested_price_cents,
+            requested_slippage_bps=round(actual_bps, 4),
+            order_type="GTC",
         )
 
     @staticmethod
