@@ -88,6 +88,7 @@ class BackgroundOrchestrator:
         self.notifications = NotificationService(
             token=settings.telegram_bot_token,
             chat_id=settings.telegram_chat_id,
+            alert_chat_id=settings.telegram_alert_chat_id,
         )
 
         self._risk_mode: RiskMode = settings.risk_mode
@@ -196,6 +197,7 @@ class BackgroundOrchestrator:
         self.notifications.register_pnl_provider(self.get_pnl_status)
         self.notifications.register_controls(
             mode_setter=self.set_mode,
+            trading_setter=self.set_trading_enabled,
             boost_setter=self.set_boost,
             price_filter_setter=self.set_price_filter,
             top_wallets_provider=self.get_top_wallets,
@@ -759,6 +761,12 @@ class BackgroundOrchestrator:
     async def check_polymarket_credentials(self) -> dict[str, Any]:
         return await self.polymarket_client.diagnose_live_credentials()
 
+    def issue_telegram_dashboard_session(self, init_data: str) -> dict[str, Any]:
+        return self.notifications.issue_dashboard_session(init_data)
+
+    def has_valid_dashboard_session(self, token: str | None) -> bool:
+        return self.notifications.has_valid_dashboard_session(token)
+
     async def get_discovery_status(self) -> dict[str, Any]:
         top = await self.get_top_wallets(limit=10)
         result = self.wallet_discovery.last_result
@@ -1188,7 +1196,8 @@ class BackgroundOrchestrator:
             await session.commit()
             
             await self.notifications.send_message(
-                f"🛑 <b>Manual Close</b>\n{position.market_id} | {position.outcome}\nQuantity: {position.quantity:.2f}"
+                f"🛑 <b>Manual Close</b>\n{position.market_id} | {position.outcome}\nQuantity: {position.quantity:.2f}",
+                parse_mode="HTML",
             )
             
             # Kick off async sync of balance / portfolios

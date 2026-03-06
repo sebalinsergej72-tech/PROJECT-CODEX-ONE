@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -134,6 +134,13 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: int | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
+    telegram_alert_chat_id: int | None = Field(default=None, alias="TELEGRAM_ALERT_CHAT_ID")
+    telegram_allowed_user_ids: list[int] = Field(default_factory=list, alias="TELEGRAM_ALLOWED_USER_IDS")
+    telegram_allowed_usernames: list[str] = Field(default_factory=list, alias="TELEGRAM_ALLOWED_USERNAMES")
+    telegram_webapp_session_ttl_seconds: int = Field(
+        default=900,
+        alias="TELEGRAM_WEBAPP_SESSION_TTL_SECONDS",
+    )
     dashboard_write_token: str | None = Field(default=None, alias="DASHBOARD_WRITE_TOKEN")
     dashboard_refresh_seconds: int = Field(default=10, alias="DASHBOARD_REFRESH_SECONDS")
     
@@ -146,6 +153,35 @@ class Settings(BaseSettings):
         if self.railway_public_domain:
             return f"https://{self.railway_public_domain}"
         return "http://localhost:8000"
+
+    @field_validator("telegram_allowed_user_ids", mode="before")
+    @classmethod
+    def _parse_telegram_allowed_user_ids(cls, value: object) -> object:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [int(item) for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [int(item.strip()) for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("telegram_allowed_usernames", mode="before")
+    @classmethod
+    def _parse_telegram_allowed_usernames(cls, value: object) -> object:
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            raw_items = value
+        elif isinstance(value, str):
+            raw_items = value.split(",")
+        else:
+            return value
+        cleaned: list[str] = []
+        for item in raw_items:
+            username = str(item).strip().lstrip("@").lower()
+            if username:
+                cleaned.append(username)
+        return cleaned
 
     @property
     def resolved_wallets_config_path(self) -> Path:

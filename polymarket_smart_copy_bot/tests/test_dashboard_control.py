@@ -17,6 +17,7 @@ class DummyOrchestrator:
         self._price_filter = False
         self._autoadd = False
         self._cleanup_runs = 0
+        self._dashboard_sessions: set[str] = {"telegram-session-token"}
 
     async def set_trading_enabled(self, enabled: bool) -> dict:
         self._enabled = enabled
@@ -56,6 +57,20 @@ class DummyOrchestrator:
                 "sync_status": "canceled",
                 "tracked_order_ids": 1,
             },
+        }
+
+    def has_valid_dashboard_session(self, token: str | None) -> bool:
+        return bool(token and token in self._dashboard_sessions)
+
+    def issue_telegram_dashboard_session(self, init_data: str) -> dict:
+        if init_data == "forbidden":
+            raise PermissionError("telegram_user_not_allowed")
+        if init_data == "bad":
+            raise ValueError("telegram_hash_invalid")
+        return {
+            "dashboard_token": "telegram-session-token",
+            "expires_at": "2026-03-07T00:30:00+00:00",
+            "user_id": 123456,
         }
 
 
@@ -131,6 +146,43 @@ def test_control_runtime_switches() -> None:
     assert price_filter.json()["price_filter_enabled"] is True
     assert autoadd.status_code == 200
     assert autoadd.json()["discovery_autoadd"] is True
+
+
+def test_control_accepts_telegram_dashboard_session_token() -> None:
+    app = FastAPI()
+    app.include_router(control_router)
+    app.state.orchestrator = DummyOrchestrator()
+
+    original = settings.dashboard_write_token
+    settings.dashboard_write_token = "secret-token"
+    try:
+        with TestClient(app) as client:
+            authorized = client.post(
+                "/control/trading",
+                headers={"X-Dashboard-Token": "telegram-session-token"},
+                json={"enabled": False, "run_now": False},
+            )
+    finally:
+        settings.dashboard_write_token = original
+
+    assert authorized.status_code == 200
+    assert authorized.json()["trading_enabled"] is False
+
+
+def test_telegram_webapp_auth_endpoint() -> None:
+    app = FastAPI()
+    app.include_router(control_router)
+    app.state.orchestrator = DummyOrchestrator()
+
+    with TestClient(app) as client:
+        ok = client.post("/control/telegram-webapp/auth", json={"init_data": "ok"})
+        bad = client.post("/control/telegram-webapp/auth", json={"init_data": "bad"})
+        forbidden = client.post("/control/telegram-webapp/auth", json={"init_data": "forbidden"})
+
+    assert ok.status_code == 200
+    assert ok.json()["dashboard_token"] == "telegram-session-token"
+    assert bad.status_code == 401
+    assert forbidden.status_code == 403
 
 
 def test_control_engine_switch() -> None:

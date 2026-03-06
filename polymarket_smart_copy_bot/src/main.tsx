@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 
 import App from "./App";
 import "./index.css";
+import { bootstrapTelegramWebAppAuth } from "./lib/telegram";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -15,7 +16,7 @@ const queryClient = new QueryClient({
   },
 });
 
-// Auto-login interceptor for Telegram / External Links
+// Backward-compatible auto-login for direct external links with a static token.
 const params = new URLSearchParams(window.location.search);
 const token = params.get("token");
 if (token) {
@@ -28,6 +29,7 @@ if (token) {
 if (window.Telegram?.WebApp) {
   window.Telegram.WebApp.ready();
   window.Telegram.WebApp.expand();
+  void bootstrapTelegramWebAppAuth();
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

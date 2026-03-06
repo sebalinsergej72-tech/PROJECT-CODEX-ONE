@@ -3,12 +3,35 @@ const getBaseUrl = (): string => {
   return raw.replace(/\/+$/, "");
 };
 
+const getStoredDashboardToken = (): string => {
+  return (
+    localStorage.getItem("dashboard_session_token") ||
+    localStorage.getItem("dashboard_write_token") ||
+    ""
+  );
+};
+
 const getAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem("dashboard_write_token") || "";
+  const token = getStoredDashboardToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["X-Dashboard-Token"] = token;
   return headers;
 };
+
+export async function authenticateTelegramWebApp(initData: string) {
+  const resp = await fetch(`${getBaseUrl()}/control/telegram-webapp/auth`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ init_data: initData }),
+  });
+  if (!resp.ok) {
+    const err = (await resp.json().catch(() => ({ detail: "telegram_auth_failed" }))) as {
+      detail?: string;
+    };
+    throw new Error(err.detail || `HTTP ${resp.status}`);
+  }
+  return resp.json() as Promise<{ dashboard_token: string; expires_at: string }>;
+}
 
 export interface DiscoveryStats {
   total_candidates: number;

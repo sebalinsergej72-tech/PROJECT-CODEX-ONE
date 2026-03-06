@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 
+import { authenticateTelegramWebApp } from "./api";
+
 export function useTelegramTheme() {
     const [themeParams, setThemeParams] = useState<any>(null);
 
@@ -21,11 +23,34 @@ export function useTelegramTheme() {
     return themeParams;
 }
 
+export async function bootstrapTelegramWebAppAuth() {
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp?.initData) return;
+
+    try {
+        const auth = await authenticateTelegramWebApp(webApp.initData);
+        if (auth.dashboard_token) {
+            localStorage.setItem("dashboard_session_token", auth.dashboard_token);
+        }
+    } catch (error) {
+        console.warn("Telegram WebApp auth failed", error);
+        localStorage.removeItem("dashboard_session_token");
+    }
+}
+
 // Ensure the Telegram window property is typed
 declare global {
     interface Window {
         Telegram?: {
-            WebApp?: any;
+            WebApp?: {
+                initData?: string;
+                initDataUnsafe?: unknown;
+                themeParams?: unknown;
+                ready: () => void;
+                expand: () => void;
+                onEvent: (event: string, cb: () => void) => void;
+                offEvent: (event: string, cb: () => void) => void;
+            };
         };
     }
 }
