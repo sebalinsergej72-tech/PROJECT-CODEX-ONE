@@ -327,32 +327,19 @@ class PortfolioTracker:
     DUST_VALUE_THRESHOLD_USD = 0.05
 
     async def calculate_state(self, session: AsyncSession, risk_mode: RiskMode) -> PortfolioState:
-        if self.polymarket_client.is_dry_run():
-            positions = (
-                await session.execute(
-                    select(Position).where(Position.is_open.is_(True))
-                )
-            ).scalars().all()
-        else:
-            # LIVE mode: dashboard/risk state must follow real account positions
-            # synced from Polymarket (`wallet_address == ACCOUNT_SYNC_WALLET`).
-            account_positions = (
-                await session.execute(
-                    select(Position).where(
-                        Position.is_open.is_(True),
-                        Position.wallet_address == self.ACCOUNT_SYNC_WALLET,
-                    )
-                )
-            ).scalars().all()
-            if account_positions:
-                positions = account_positions
-            else:
-                # Startup fallback before first account sync finishes.
-                positions = (
-                    await session.execute(
-                        select(Position).where(Position.is_open.is_(True))
-                    )
-                ).scalars().all()
+        # Always use ALL open positions for risk/exposure calculation.
+        # In LIVE mode, `sync_account_open_positions` keeps position data
+        # authoritative regardless of `wallet_address`.  Filtering by
+        # ACCOUNT_SYNC_WALLET here was incorrect because `_apply_remote_snapshot`
+        # preserves the original wallet_address for mirror-close reconciliation,
+        # meaning many synced positions keep their real 0x… address.
+        # Counting only account_sync rows underestimated exposure and broke
+        # risk checks (total_exposure_limit triggered at wrong thresholds).
+        positions = (
+            await session.execute(
+                select(Position).where(Position.is_open.is_(True))
+            )
+        ).scalars().all()
 
         # Exposure = current market value of positions, NOT historical cost.
         # Using invested_usd would overstate exposure for positions that lost
