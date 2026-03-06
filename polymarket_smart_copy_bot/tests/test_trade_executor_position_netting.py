@@ -165,3 +165,45 @@ def test_market_position_precheck_counts_pending_submitted_orders() -> None:
         assert allowed == pytest.approx(4.5, rel=1e-6)
 
     asyncio.run(_run_with_session(_case))
+
+
+def test_build_execution_plan_uses_gtc_for_aggressive_buy() -> None:
+    class _DummyClient:
+        pass
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    executor = TradeExecutor(_DummyClient(), _DummyClient(), _DummyClient(), _DummyPortfolioTracker())
+    executor.risk_manager.can_accept_slippage = lambda **kwargs: (True, 5.0)  # type: ignore[method-assign]
+
+    plan = executor._build_execution_plan(
+        intent=_intent(side="buy", price_cents=60.0, size_usd=7.0),
+        target_size_usd=7.0,
+        risk_mode="aggressive",
+    )
+
+    assert plan is not None
+    assert plan.order_type == "GTC"
+    assert plan.order_request.order_type == "GTC"
+
+
+def test_build_execution_plan_keeps_fak_for_aggressive_sell() -> None:
+    class _DummyClient:
+        pass
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    executor = TradeExecutor(_DummyClient(), _DummyClient(), _DummyClient(), _DummyPortfolioTracker())
+    executor.risk_manager.can_accept_slippage = lambda **kwargs: (True, 5.0)  # type: ignore[method-assign]
+
+    plan = executor._build_execution_plan(
+        intent=_intent(side="sell", price_cents=60.0, size_usd=7.0),
+        target_size_usd=7.0,
+        risk_mode="aggressive",
+    )
+
+    assert plan is not None
+    assert plan.order_type == "FAK"
+    assert plan.order_request.order_type == "FAK"
