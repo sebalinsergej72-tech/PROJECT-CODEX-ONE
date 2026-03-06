@@ -1,4 +1,11 @@
+export const isTelegramWebApp = (): boolean => {
+  return Boolean(window.Telegram?.WebApp);
+};
+
 const getBaseUrl = (): string => {
+  if (isTelegramWebApp()) {
+    return "";
+  }
   const raw = localStorage.getItem("bot_api_url") || "";
   return raw.replace(/\/+$/, "");
 };
