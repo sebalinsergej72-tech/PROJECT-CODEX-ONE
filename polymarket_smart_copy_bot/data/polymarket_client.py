@@ -870,6 +870,7 @@ class PolymarketClient:
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
         from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
+        import math
 
         clob_client = self._ensure_clob_client()
 
@@ -880,10 +881,9 @@ class PolymarketClient:
         _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
         clob_order_type = _order_type_map.get(request.order_type, OrderType.GTC)
 
-        if side == BUY:
-            # Use the market-order builder for BUYs so the signed maker amount stays
-            # in USDC terms with 2-decimal precision, matching the current CLOB API
-            # constraint enforced by Polymarket.
+        if side == BUY and clob_order_type != OrderType.GTC:
+            # Use the market-order builder for taker-style BUYs so the signed
+            # maker amount stays in USDC terms with market-order precision.
             order_args = MarketOrderArgs(
                 token_id=request.token_id,
                 amount=round(max(request.size_usd, 0.01), 2),
@@ -893,8 +893,6 @@ class PolymarketClient:
             )
             signed_order = clob_client.create_market_order(order_args)
         else:
-            import math
-
             raw_size = max(request.size_usd / price_decimal, 1.0)
             size = math.floor(raw_size * 100) / 100
             order_args = OrderArgs(

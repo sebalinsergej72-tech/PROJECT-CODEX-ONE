@@ -24,7 +24,7 @@ class _FakeClobClient:
         return {"success": True, "orderID": "test-order-id"}
 
 
-def test_place_order_sync_uses_market_order_builder_for_buy() -> None:
+def test_place_order_sync_uses_market_order_builder_for_buy_fok() -> None:
     client = PolymarketClient()
     fake = _FakeClobClient()
     client._ensure_clob_client = lambda: fake  # type: ignore[method-assign]
@@ -47,6 +47,31 @@ def test_place_order_sync_uses_market_order_builder_for_buy() -> None:
     assert fake.market_order_args.price == 0.71
     assert fake.limit_order_args is None
     assert fake.posted_order["kind"] == "market"
+
+
+def test_place_order_sync_uses_limit_order_builder_for_buy_gtc() -> None:
+    client = PolymarketClient()
+    fake = _FakeClobClient()
+    client._ensure_clob_client = lambda: fake  # type: ignore[method-assign]
+
+    result = client._place_order_sync(
+        OrderRequest(
+            token_id="token-gtc",
+            side="buy",
+            price_cents=61.0,
+            size_usd=7.01,
+            market_id="market-gtc",
+            outcome="Yes",
+            order_type="GTC",
+        )
+    )
+
+    assert result["success"] is True
+    assert fake.limit_order_args is not None
+    assert fake.limit_order_args.price == 0.61
+    assert fake.limit_order_args.size == 11.49
+    assert fake.market_order_args is None
+    assert fake.posted_order["kind"] == "limit"
 
 
 def test_place_order_sync_uses_limit_order_builder_for_sell() -> None:
