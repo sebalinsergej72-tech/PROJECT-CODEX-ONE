@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     max_qualified_wallets: int = Field(default=12, alias="MAX_QUALIFIED_WALLETS")
 
     # Aggressive strategy knobs
-    max_wallets_aggressive: int = Field(default=10, alias="MAX_WALLETS_AGGRESSIVE")
+    max_wallets_aggressive: int = Field(default=15, alias="MAX_WALLETS_AGGRESSIVE")
     min_wallets_aggressive: int = Field(default=3, alias="MIN_WALLETS_AGGRESSIVE")
     max_per_wallet_pct: float = Field(default=0.15, alias="MAX_PER_WALLET_PCT")
     max_per_position_pct: float = Field(default=0.10, alias="MAX_PER_POSITION_PCT")
