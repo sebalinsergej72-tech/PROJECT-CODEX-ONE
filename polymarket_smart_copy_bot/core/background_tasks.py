@@ -1204,7 +1204,7 @@ class BackgroundOrchestrator:
         return {
             "ok": True,
             "last_wallet_refresh_at": self._iso(self.last_wallet_refresh_at),
-            "last_discovery_stats": stats.get("last_discovery_stats"),
+            "discovery": stats,
         }
 
     async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
