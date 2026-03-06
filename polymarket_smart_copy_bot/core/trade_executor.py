@@ -269,6 +269,15 @@ class TradeExecutor:
                 intent=intent,
                 target_size_usd=target_size_usd,
             )
+        elif execution_plan.order_type == "GTC":
+            copied_trade.ttl_expires_at = copied_trade.submitted_at + timedelta(
+                seconds=max(60, settings.aggressive_fill_ttl_seconds)
+            )
+            copied_trade.reason = f"{copied_trade.reason} | awaiting_fill_monitor"
+            reconcile_result = FillReconcileResult(
+                status=TradeStatus.SUBMITTED,
+                order_open=True,
+            )
         else:
             reconcile_result = await self._reconcile_trade_fill_state(
                 session=session,
