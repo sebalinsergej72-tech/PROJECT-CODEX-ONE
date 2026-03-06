@@ -874,8 +874,13 @@ class PolymarketClient:
         clob_client = self._ensure_clob_client()
 
         side = BUY if request.side.lower() == "buy" else SELL
-        price_decimal = max(min(request.price_cents / 100, 0.999), 0.001)
-        size = max(request.size_usd / price_decimal, 1.0)
+        price_decimal = round(max(min(request.price_cents / 100, 0.999), 0.001), 2)
+        # Polymarket CLOB requires: maker_amount (USDC = size*price) max 2 decimals,
+        # taker_amount (shares = size) max 4 decimals.
+        # Truncate size so that size*price stays within 2-decimal precision.
+        import math
+        raw_size = max(request.size_usd / price_decimal, 1.0)
+        size = math.floor(raw_size * 100) / 100  # truncate to 2 decimals
 
         # IMPROVED: flexible fill mode — support IOC (FAK) and FOK order types
         _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
