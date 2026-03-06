@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")                   # +0.05% default
     max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")   # hard cap 0.15%
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")  # 2 minutes
+    aggressive_reprice_delay_seconds: int = Field(
+        default=25,
+        alias="AGGRESSIVE_REPRICE_DELAY_SECONDS",
+    )
+    aggressive_reprice_total_ttl_seconds: int = Field(
+        default=60,
+        alias="AGGRESSIVE_REPRICE_TOTAL_TTL_SECONDS",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
