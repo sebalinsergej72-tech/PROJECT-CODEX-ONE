@@ -423,8 +423,10 @@ class TradeExecutor:
                 )
                 return None
             requested_slippage_bps = round(actual_bps, 4)
-            # SAFETY: safe aggressive fill via immediate-or-cancel semantics.
-            order_type = "FAK"
+            # Let aggressive BUY orders rest briefly on the book instead of
+            # failing immediately on thin markets. SELL mirror-closes keep
+            # immediate semantics to avoid lingering stale exits.
+            order_type = "GTC" if side == TradeSide.BUY.value else "FAK"
 
         return ExecutionPlan(
             order_request=OrderRequest(
