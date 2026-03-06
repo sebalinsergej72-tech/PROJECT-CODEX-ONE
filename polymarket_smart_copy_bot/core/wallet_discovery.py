@@ -32,6 +32,8 @@ class CandidateSeed:
     last_trade_ts_hint: datetime | None = None
     consecutive_losses_hint: int | None = None
     wallet_age_days_hint: int | None = None
+    volume_hint: float | None = None
+    leaderboard_rank_hint: int | None = None
 
 
 @dataclass(slots=True)
@@ -381,6 +383,16 @@ class WalletDiscovery:
                 age_days = self._extract_wallet_age_days_hint(row)
                 if age_days is not None:
                     seed.wallet_age_days_hint = max(seed.wallet_age_days_hint or 0, age_days)
+
+                vol = self._to_float(row.get("vol"))
+                if vol and vol > 0:
+                    seed.volume_hint = max(seed.volume_hint or 0.0, vol)
+
+                rank_raw = self._to_float(row.get("rank") or 0)
+                if rank_raw > 0:
+                    rank_int = int(rank_raw)
+                    if seed.leaderboard_rank_hint is None or rank_int < seed.leaderboard_rank_hint:
+                        seed.leaderboard_rank_hint = rank_int
         return candidates
 
     async def _score_candidates(
@@ -523,8 +535,26 @@ class WalletDiscovery:
         progress.passed_consecutive_losses = True
 
         wallet_age_days = self._wallet_age_days(raw_activity, parsed_trades, now)
-        if wallet_age_days == 0 and seed.wallet_age_days_hint is not None:
-            wallet_age_days = seed.wallet_age_days_hint
+
+        # Detect data saturation: API returned ~500 records but computed
+        # age is suspiciously low — the 500-record cap truncated history.
+        data_saturated = (
+            len(raw_activity) >= 490
+            and wallet_age_days < thresholds.min_wallet_age_days
+        )
+
+        # Use leaderboard hint when data is absent or saturated.
+        if seed.wallet_age_days_hint is not None and (
+            wallet_age_days == 0 or data_saturated
+        ):
+            wallet_age_days = max(wallet_age_days, seed.wallet_age_days_hint)
+
+        # Final fallback: heuristic maturity estimate from leaderboard signals.
+        if wallet_age_days < thresholds.min_wallet_age_days:
+            estimated = self._estimate_wallet_maturity_days(seed)
+            if estimated is not None:
+                wallet_age_days = max(wallet_age_days, estimated)
+
         if wallet_age_days < thresholds.min_wallet_age_days:
             return None, "min_wallet_age_days", progress
         progress.passed_wallet_age = True
@@ -626,6 +656,59 @@ class WalletDiscovery:
         if earliest is None:
             return 0
         return max((now - earliest).days, 0)
+
+    @staticmethod
+    def _estimate_wallet_maturity_days(seed: "CandidateSeed") -> int | None:
+        """Estimate wallet maturity from leaderboard signals.
+
+        The wallet_age filter rejects "lucky new accounts."  A wallet on the
+        Polymarket leaderboard with significant volume and trade count is
+        definitionally not a newcomer.  Returns an estimated minimum age in
+        days, or None if insufficient corroborating signals.
+        """
+        signals = 0
+        estimated_days = 0
+
+        # Signal 1: monthly trading volume
+        vol = seed.volume_hint
+        if vol is not None:
+            if vol >= 50_000:
+                estimated_days = max(estimated_days, 90)
+                signals += 2
+            elif vol >= 10_000:
+                estimated_days = max(estimated_days, 60)
+                signals += 1
+            elif vol >= 2_000:
+                estimated_days = max(estimated_days, 30)
+                signals += 1
+
+        # Signal 2: trade count
+        trades = seed.trades_90d_hint or 0
+        if trades >= 200:
+            estimated_days = max(estimated_days, 90)
+            signals += 2
+        elif trades >= 100:
+            estimated_days = max(estimated_days, 60)
+            signals += 1
+        elif trades >= 50:
+            estimated_days = max(estimated_days, 30)
+            signals += 1
+
+        # Signal 3: top leaderboard rank
+        rank = seed.leaderboard_rank_hint
+        if rank is not None and rank <= 50:
+            estimated_days = max(estimated_days, 60)
+            signals += 1
+
+        # Signal 4: active in multiple categories
+        if len(seed.niches) >= 2:
+            signals += 1
+
+        # Require ≥2 corroborating signals to trust the estimate
+        if signals >= 2 and estimated_days > 0:
+            return estimated_days
+
+        return None
 
     @staticmethod
     def _extract_address(payload: dict[str, Any]) -> str | None:
