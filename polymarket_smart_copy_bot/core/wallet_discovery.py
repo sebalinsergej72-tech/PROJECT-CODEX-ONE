@@ -189,7 +189,8 @@ class WalletDiscovery:
         else:
             rejected_reasons["no_candidates"] = 1
 
-        top10 = scored[:10]
+        enabled_limit = self._enabled_limit_for_mode(mode)
+        selected_wallets = scored[:enabled_limit]
 
         all_existing = (await session.execute(select(QualifiedWallet))).scalars().all()
         existing_by_address = {row.address: row for row in all_existing}
@@ -199,11 +200,10 @@ class WalletDiscovery:
         approvals_granted = 0
         approvals_skipped = 0
 
-        top10_addresses = {row.address for row in top10}
+        selected_addresses = {row.address for row in selected_wallets}
         now_dt = utc_now()
-        enabled_limit = self._enabled_limit_for_mode(mode)
 
-        for idx, wallet in enumerate(top10):
+        for idx, wallet in enumerate(selected_wallets):
             model = existing_by_address.get(wallet.address)
             if model is None:
                 model = QualifiedWallet(address=wallet.address)
@@ -233,7 +233,7 @@ class WalletDiscovery:
             model.updated_at = now_dt
 
         for address, row in existing_by_address.items():
-            if address not in top10_addresses:
+            if address not in selected_addresses:
                 row.enabled = False
                 row.updated_at = now_dt
 
@@ -244,7 +244,7 @@ class WalletDiscovery:
             ran_at=now,
             counters=counters,
             thresholds=thresholds,
-            stored_top=len(top10),
+            stored_top=len(selected_wallets),
             enabled_wallets=enabled_count,
             approvals_requested=approvals_requested,
             approvals_granted=approvals_granted,

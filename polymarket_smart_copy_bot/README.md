@@ -156,7 +156,7 @@ If `DASHBOARD_WRITE_TOKEN` is set, control actions require this token in UI inpu
 
 `RISK_MODE=aggressive` is optimized for very small accounts and higher volatility tolerance.
 
-- Wallet selection: top 3-6 hottest wallets (strict thresholds)
+- Wallet selection: top 3-15 hottest wallets (strict thresholds)
 - Per-wallet cap: 15%
 - Per-position cap: 10%
 - Total exposure cap: 65%
