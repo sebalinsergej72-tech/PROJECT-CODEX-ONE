@@ -27,12 +27,20 @@ class EngineControlRequest(BaseModel):
     dry_run: bool
 
 
-def _assert_write_access(token: str | None) -> None:
+class TelegramWebAppAuthRequest(BaseModel):
+    init_data: str = Field(min_length=1)
+
+
+def _assert_write_access(request: Request, token: str | None) -> None:
     required = settings.dashboard_write_token
-    if not required:
+    if not required and not token:
         return
-    if token != required:
-        raise HTTPException(status_code=401, detail="Invalid dashboard write token")
+    if required and token == required:
+        return
+    orchestrator = _get_orchestrator(request)
+    if orchestrator.has_valid_dashboard_session(token):
+        return
+    raise HTTPException(status_code=401, detail="Invalid dashboard write token")
 
 
 def _get_orchestrator(request: Request):
@@ -48,7 +56,7 @@ async def control_trading(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
 
     status = await orchestrator.set_trading_enabled(payload.enabled)
@@ -93,7 +101,7 @@ async def control_mode(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_mode(payload.mode)
     return {"status": "ok", "risk_mode": status.get("risk_mode", payload.mode)}
@@ -105,7 +113,7 @@ async def control_boost(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_boost(payload.enabled)
     return {
@@ -120,7 +128,7 @@ async def control_price_filter(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_price_filter(payload.enabled)
     return {
@@ -135,7 +143,7 @@ async def control_autoadd(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_autoadd(payload.enabled)
     return {"status": "ok", "discovery_autoadd": status.get("discovery_autoadd", payload.enabled)}
@@ -147,7 +155,7 @@ async def control_engine(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     status = await orchestrator.set_dry_run(payload.dry_run)
     return {
@@ -162,7 +170,7 @@ async def control_polymarket_check(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.check_polymarket_credentials()
     return {"status": "ok", **result}
@@ -173,7 +181,7 @@ async def control_discovery_run(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_discovery_now()
     return {"status": "ok", **result}
@@ -184,7 +192,7 @@ async def control_capital_recalc(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_capital_recalc_now()
     return {"status": "ok", **result}
@@ -195,7 +203,7 @@ async def control_portfolio_refresh(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_portfolio_refresh_now()
     return {"status": "ok", **result}
@@ -206,7 +214,7 @@ async def control_stale_orders_cleanup(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.run_stale_order_cleanup_now()
     return {"status": "ok", **result}
@@ -221,7 +229,7 @@ async def control_purge_positions(
 
     Useful for removing dry-run leftovers or orphaned positions after a mode switch.
     """
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.purge_stale_positions()
     return {"status": "ok", **result}
@@ -233,7 +241,7 @@ async def control_close_position(
     request: Request,
     x_dashboard_token: str | None = Header(default=None),
 ) -> dict:
-    _assert_write_access(x_dashboard_token)
+    _assert_write_access(request, x_dashboard_token)
     orchestrator = _get_orchestrator(request)
     result = await orchestrator.manual_close_position(position_id)
     if not result.get("success"):
@@ -242,3 +250,18 @@ async def control_close_position(
             detail=result.get("error", "Failed to close position manually")
         )
     return {"status": "ok", **result}
+
+
+@router.post("/control/telegram-webapp/auth")
+async def control_telegram_webapp_auth(
+    payload: TelegramWebAppAuthRequest,
+    request: Request,
+) -> dict:
+    orchestrator = _get_orchestrator(request)
+    try:
+        session = orchestrator.issue_telegram_dashboard_session(payload.init_data)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return {"status": "ok", **session}
