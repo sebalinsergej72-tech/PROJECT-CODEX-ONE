@@ -868,31 +868,42 @@ class PolymarketClient:
         }
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
 
         clob_client = self._ensure_clob_client()
 
         side = BUY if request.side.lower() == "buy" else SELL
         price_decimal = round(max(min(request.price_cents / 100, 0.999), 0.001), 2)
-        # Polymarket CLOB requires: maker_amount (USDC = size*price) max 2 decimals,
-        # taker_amount (shares = size) max 4 decimals.
-        # Truncate size so that size*price stays within 2-decimal precision.
-        import math
-        raw_size = max(request.size_usd / price_decimal, 1.0)
-        size = math.floor(raw_size * 100) / 100  # truncate to 2 decimals
 
         # IMPROVED: flexible fill mode — support IOC (FAK) and FOK order types
         _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
         clob_order_type = _order_type_map.get(request.order_type, OrderType.GTC)
 
-        order_args = OrderArgs(
-            token_id=request.token_id,
-            price=price_decimal,
-            size=size,
-            side=side,
-        )
-        signed_order = clob_client.create_order(order_args)
+        if side == BUY:
+            # Use the market-order builder for BUYs so the signed maker amount stays
+            # in USDC terms with 2-decimal precision, matching the current CLOB API
+            # constraint enforced by Polymarket.
+            order_args = MarketOrderArgs(
+                token_id=request.token_id,
+                amount=round(max(request.size_usd, 0.01), 2),
+                side=side,
+                price=price_decimal,
+                order_type=clob_order_type,
+            )
+            signed_order = clob_client.create_market_order(order_args)
+        else:
+            import math
+
+            raw_size = max(request.size_usd / price_decimal, 1.0)
+            size = math.floor(raw_size * 100) / 100
+            order_args = OrderArgs(
+                token_id=request.token_id,
+                price=price_decimal,
+                size=size,
+                side=side,
+            )
+            signed_order = clob_client.create_order(order_args)
         try:
             return clob_client.post_order(signed_order, clob_order_type)
         except Exception as exc:
