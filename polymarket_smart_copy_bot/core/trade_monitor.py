@@ -151,6 +151,10 @@ class TradeMonitor:
             grouped.setdefault(row.wallet_address.lower(), []).append(row)
         return grouped
 
+    # Maximum trade intents per wallet per scan cycle to prevent
+    # rapid-fire copying when a wallet spams many trades at once.
+    MAX_INTENTS_PER_WALLET = 2
+
     @staticmethod
     def _signals_to_intents(
         wallet: QualifiedWallet,
@@ -190,6 +194,9 @@ class TradeMonitor:
                     is_short_term=is_short,
                 )
             )
+
+            if len(intents) >= TradeMonitor.MAX_INTENTS_PER_WALLET:
+                break
 
         return intents
 

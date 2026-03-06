@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     kelly_multiplier: float = Field(default=2.0, alias="KELLY_MULTIPLIER")
     drawdown_stop_pct: float = Field(default=0.25, alias="DRAWDOWN_STOP_PCT")
     enable_short_term_markets: bool = Field(default=True, alias="ENABLE_SHORT_TERM_MARKETS")
-    disable_price_filter: bool = Field(default=True, alias="DISABLE_PRICE_FILTER")
+    disable_price_filter: bool = Field(default=False, alias="DISABLE_PRICE_FILTER")
     auto_reinvest: bool = Field(default=True, alias="AUTO_REINVEST")
     high_conviction_multiplier: float = Field(default=1.5, alias="HIGH_CONVICTION_MULTIPLIER")
     # SAFETY: safe aggressive fill
