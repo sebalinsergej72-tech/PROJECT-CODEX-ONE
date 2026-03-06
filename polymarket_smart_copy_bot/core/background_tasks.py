@@ -575,12 +575,12 @@ class BackgroundOrchestrator:
 
                 # Calculate slippage
                 if trade.price_cents and trade.price_cents > 0 and trade.filled_price_cents:
-                    _, slippage = self.risk_manager.can_accept_slippage(
+                    slippage = RiskManager.compute_slippage_bps(
                         source_price_cents=trade.price_cents,
                         execution_price_cents=trade.filled_price_cents,
-                        max_allowed_bps=settings.max_allowed_slippage_bps,
+                        side=trade.side if trade.side in ("buy", "sell") else "buy",
                     )
-                    trade.slippage_bps = slippage
+                    trade.slippage_bps = round(slippage, 2)
                 else:
                     slippage = 0.0
 
@@ -1197,6 +1197,15 @@ class BackgroundOrchestrator:
                 "tx_hash": result.tx_hash,
                 "order_id": result.order_id
             }
+
+    async def run_discovery_now(self) -> dict[str, Any]:
+        await self._run_wallet_discovery_job()
+        stats = await self.get_discovery_status()
+        return {
+            "ok": True,
+            "last_wallet_refresh_at": self._iso(self.last_wallet_refresh_at),
+            "last_discovery_stats": stats.get("last_discovery_stats"),
+        }
 
     async def run_stale_order_cleanup_now(self) -> dict[str, Any]:
         await self._run_stale_order_cleanup_job(expired_by_ttl=False)

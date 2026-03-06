@@ -265,26 +265,6 @@ class RiskManager:
         stop = settings.drawdown_stop_pct if risk_mode == "aggressive" else 0.12
         return portfolio.daily_drawdown_pct >= stop
 
-    # SAFETY: safe aggressive fill — slippage gate
-    @staticmethod
-    def can_accept_slippage(
-        *,
-        source_price_cents: float,
-        execution_price_cents: float,
-        max_allowed_bps: float,
-    ) -> tuple[bool, float]:
-        """Check if slippage is within the hard limit.
-
-        Returns (allowed, actual_slippage_bps).
-        Positive bps = paid more than source (buy side slippage).
-        """
-        if source_price_cents <= 0:
-            return False, 0.0
-        slippage_bps = (
-            (execution_price_cents - source_price_cents) / source_price_cents
-        ) * 10_000
-        return abs(slippage_bps) <= max_allowed_bps, round(slippage_bps, 2)
-
     @staticmethod
     def _price_filter(price_cents: float) -> bool:
         return settings.price_min_cents <= price_cents <= settings.price_max_cents
