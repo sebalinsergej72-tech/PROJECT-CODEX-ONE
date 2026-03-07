@@ -145,7 +145,7 @@ class RiskManager:
         if remaining_total_capacity <= 0:
             return RiskDecision(False, "total_exposure_limit", 0.0, False)
 
-        wallet_multiplier = 0.8 + min(max(wallet_score, 0.0), 1.5) * 0.7
+        wallet_multiplier = 0.8 + min(max(wallet_score, 0.0), 1.5) * 0.6
         if (
             high_conviction_boost_enabled
             and wallet_avg_trade_size_usd > 0
@@ -153,8 +153,8 @@ class RiskManager:
         ):
             wallet_multiplier *= settings.high_conviction_multiplier
 
-        # IMPROVED: Strict safety cap to ensure multiplier isn't blown up to dangerous levels 
-        wallet_multiplier = min(wallet_multiplier, 2.5)
+        # IMPROVED: Strict safety cap to ensure multiplier isn't blown up to dangerous levels
+        wallet_multiplier = min(wallet_multiplier, settings.max_wallet_multiplier)
 
         kelly_fraction = self._light_kelly_fraction(
             win_rate=wallet_win_rate,
@@ -166,7 +166,7 @@ class RiskManager:
         kelly_leg = capital * kelly_fraction
         raw_target_size = proportional_leg + kelly_leg
 
-        min_position_size = 1.5 if capital < 150 else 2.0
+        min_position_size = settings.min_trade_size_usd
         target_size = min(
             raw_target_size,
             per_position_cap,
@@ -176,15 +176,7 @@ class RiskManager:
         )
 
         if target_size < min_position_size:
-            if min_position_size <= min(
-                per_position_cap,
-                remaining_wallet_capacity,
-                remaining_total_capacity,
-                portfolio.available_cash_usd,
-            ):
-                target_size = min_position_size
-            else:
-                return RiskDecision(False, "below_min_position_size", 0.0, False)
+            return RiskDecision(False, "size_below_minimum", 0.0, False)
 
         requires_manual = target_size >= settings.manual_confirmation_usd
         return RiskDecision(
@@ -223,8 +215,8 @@ class RiskManager:
             portfolio.available_cash_usd,
         )
 
-        if target_size < 2.0:
-            return RiskDecision(False, "below_min_position_size", 0.0, False)
+        if target_size < settings.min_trade_size_usd:
+            return RiskDecision(False, "size_below_minimum", 0.0, False)
 
         return RiskDecision(
             allowed=True,
@@ -239,11 +231,11 @@ class RiskManager:
     def _light_kelly_fraction(*, win_rate: float, profit_factor: float, multiplier: float) -> float:
         p = min(max(win_rate, 0.0), 0.99)
         q = 1 - p
-        b = min(max(profit_factor, 1.01), 4.0)
+        b = min(max(profit_factor, 1.01), 2.5)
 
         kelly = max(((b * p) - q) / b, 0.0)
         # Light Kelly to reduce overbetting noise, then apply strategy multiplier.
-        return min(kelly * 0.25 * multiplier, 0.22)
+        return min(kelly * settings.kelly_fraction_scale * multiplier, settings.max_kelly_bet_pct)
 
     @staticmethod
     def _global_drawdown_triggered(portfolio: PortfolioState, risk_mode: RiskMode) -> bool:

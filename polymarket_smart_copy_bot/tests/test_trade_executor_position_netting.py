@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from core.trade_executor import TradeExecutor
 from core.risk_manager import PortfolioState, RiskDecision
 from core.trade_monitor import TradeIntent
+from data.polymarket_client import OrderbookLevel, OrderbookSnapshot
 from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 
 
@@ -212,6 +213,14 @@ def test_build_execution_plan_keeps_fak_for_aggressive_sell() -> None:
 
 def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:
     class _DummyPolymarketClient:
+        async def fetch_orderbook(self, token_id):
+            return OrderbookSnapshot(
+                bids=[OrderbookLevel(price=0.59, size=100.0)],
+                asks=[OrderbookLevel(price=0.60, size=100.0)],
+                best_bid=0.59,
+                best_ask=0.60,
+            )
+
         async def place_order(self, request):
             return type("OrderResult", (), {"success": True, "order_id": "ord-1", "tx_hash": "tx-1", "error": None})()
 
@@ -282,6 +291,88 @@ def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:
         assert "awaiting_fill_monitor" in (row.reason or "")
 
     asyncio.run(_run_with_session(_case))
+
+
+def test_execute_copy_trade_skips_on_low_liquidity() -> None:
+    class _DummyPolymarketClient:
+        async def fetch_orderbook(self, token_id):
+            return OrderbookSnapshot(
+                bids=[OrderbookLevel(price=0.59, size=2.0)],
+                asks=[OrderbookLevel(price=0.60, size=2.0)],
+                best_bid=0.59,
+                best_ask=0.60,
+            )
+
+        async def place_order(self, request):
+            raise AssertionError("place_order should not be called when liquidity is too low")
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        def evaluate_trade(self, **kwargs):
+            return RiskDecision(True, "ok", 7.0, False, 1.0, 0.0)
+
+        def can_accept_slippage(self, **kwargs):
+            return True, 5.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+
+        portfolio = PortfolioState(100.0, 100.0, 0.0, 0.0, 0.0, 0)
+        await executor.execute_copy_trade(
+            session,
+            _intent(side="buy", price_cents=60.0, size_usd=7.0),
+            portfolio,
+            risk_mode="aggressive",
+            fill_mode="conservative",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+
+        row = (await session.execute(select(CopiedTrade))).scalar_one()
+        assert row.status == TradeStatus.SKIPPED.value
+        assert row.reason == "low_liquidity:1.20<15.00"
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_validate_sell_size_trims_to_available_position() -> None:
+    position = Position(
+        wallet_address="0xabc",
+        market_id="mkt-1",
+        token_id="tok-1",
+        outcome="Yes",
+        side=TradeSide.BUY.value,
+        quantity=5.0,
+        avg_price_cents=50.0,
+        invested_usd=2.5,
+        current_price_cents=60.0,
+        realized_pnl_usd=0.0,
+        unrealized_pnl_usd=0.0,
+        is_open=True,
+    )
+
+    trimmed, reason = TradeExecutor._validate_sell_size_against_position(
+        position=position,
+        requested_size_usd=9.0,
+        execution_price_cents=60.0,
+    )
+
+    assert trimmed == pytest.approx(3.0, rel=1e-6)
+    assert reason is None
 
 
 def test_execute_copy_trade_skips_sell_without_confirmed_position() -> None:

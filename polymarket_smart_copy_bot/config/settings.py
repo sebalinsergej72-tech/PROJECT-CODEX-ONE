@@ -64,6 +64,11 @@ class Settings(BaseSettings):
         default=60,
         alias="AGGRESSIVE_REPRICE_TOTAL_TTL_SECONDS",
     )
+    min_valid_price: float = Field(default=0.01, alias="MIN_VALID_PRICE")
+    max_valid_price: float = Field(default=0.99, alias="MAX_VALID_PRICE")
+    min_orderbook_liquidity_usd: float = Field(default=15.0, alias="MIN_ORDERBOOK_LIQUIDITY_USD")
+    liquidity_buffer_multiplier: float = Field(default=1.5, alias="LIQUIDITY_BUFFER_MULTIPLIER")
+    max_price_deviation_pct: float = Field(default=0.03, alias="MAX_PRICE_DEVIATION_PCT")
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
@@ -85,6 +90,10 @@ class Settings(BaseSettings):
     disable_price_filter: bool = Field(default=False, alias="DISABLE_PRICE_FILTER")
     auto_reinvest: bool = Field(default=True, alias="AUTO_REINVEST")
     high_conviction_multiplier: float = Field(default=1.5, alias="HIGH_CONVICTION_MULTIPLIER")
+    max_wallet_multiplier: float = Field(default=2.0, alias="MAX_WALLET_MULTIPLIER")
+    kelly_fraction_scale: float = Field(default=0.20, alias="KELLY_FRACTION")
+    max_kelly_bet_pct: float = Field(default=0.15, alias="MAX_KELLY_BET_PCT")
+    min_trade_size_usd: float = Field(default=3.0, alias="MIN_TRADE_SIZE_USD")
     # SAFETY: safe aggressive fill
     max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")
     max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
@@ -117,6 +126,15 @@ class Settings(BaseSettings):
     )
     discovery_max_days_since_last_trade_conservative: int = Field(
         default=5, alias="DISCOVERY_MAX_DAYS_SINCE_LAST_TRADE_CONSERVATIVE"
+    )
+    avg_size_score_cap: float = Field(default=50.0, alias="AVG_SIZE_CAP")
+    min_attempts_for_tradability_penalty: int = Field(
+        default=5,
+        alias="MIN_ATTEMPTS_FOR_TRADABILITY_PENALTY",
+    )
+    max_consecutive_wallet_failures_per_cycle: int = Field(
+        default=5,
+        alias="MAX_CONSECUTIVE_FAILURES",
     )
     trade_monitor_interval_seconds: int = Field(default=60, alias="TRADE_MONITOR_INTERVAL_SECONDS")
     portfolio_refresh_seconds: int = Field(default=60, alias="PORTFOLIO_REFRESH_SECONDS")
