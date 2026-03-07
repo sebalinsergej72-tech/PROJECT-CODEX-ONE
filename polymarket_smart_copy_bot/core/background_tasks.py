@@ -307,7 +307,7 @@ class BackgroundOrchestrator:
         self.scheduler.add_job(
             scheduled_order_fill_monitor,
             trigger="interval",
-            seconds=30,
+            seconds=settings.order_fill_monitor_interval_seconds,
             id="order_fill_monitor",
             replace_existing=True,
             coalesce=True,
