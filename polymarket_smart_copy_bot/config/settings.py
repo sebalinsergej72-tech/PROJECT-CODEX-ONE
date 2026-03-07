@@ -138,6 +138,9 @@ class Settings(BaseSettings):
     )
     trade_monitor_interval_seconds: int = Field(default=15, alias="TRADE_MONITOR_INTERVAL_SECONDS")
     order_fill_monitor_interval_seconds: int = Field(default=15, alias="ORDER_FILL_MONITOR_INTERVAL_SECONDS")
+    trade_reconcile_interval_seconds: int = Field(default=60, alias="TRADE_RECONCILE_INTERVAL_SECONDS")
+    account_sync_ttl_seconds: int = Field(default=30, alias="ACCOUNT_SYNC_TTL_SECONDS")
+    trade_monitor_signal_fetch_limit: int = Field(default=8, alias="TRADE_MONITOR_SIGNAL_FETCH_LIMIT")
     portfolio_refresh_seconds: int = Field(default=60, alias="PORTFOLIO_REFRESH_SECONDS")
     capital_recalc_interval_minutes: int = Field(default=60, alias="CAPITAL_RECALC_INTERVAL_MINUTES")
     stale_order_cleanup_interval_seconds: int = Field(
