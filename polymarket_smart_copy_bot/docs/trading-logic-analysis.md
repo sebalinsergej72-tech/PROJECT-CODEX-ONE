@@ -1,29 +1,33 @@
 # Trading Logic Analysis
 
 Last updated: 2026-03-07
-Source of truth: `origin/main` at commit `1c1e08c`
+Source of truth: `origin/main` at commit `4c74c74`
 Live runtime referenced in this document: `https://project-codex-one-production.up.railway.app`
 
 ## 1. Scope
 
-This document describes the protected trading logic of the Polymarket copy-trading bot as it exists in the current GitHub version. It separates:
+This document describes the current trading logic after the latest execution-safety, scoring, and risk-control updates.
 
-- core strategy logic: which wallets are selected, how signals are accepted, how size is chosen
-- execution support: how approved signals are turned into orders on Polymarket
-- runtime observations: what is happening in production right now
+It separates:
 
-This is intentionally more detailed than the README. It is meant to be a working analysis file for future review, debugging, and design decisions.
+- selection logic: how wallets qualify and how they are ranked
+- signal logic: how selected wallets produce copy-trade intents
+- risk logic: how intents are accepted or resized
+- execution logic: how accepted intents become Polymarket orders
+- live runtime observations: what production is doing right now
+
+This file is intentionally detailed and should be treated as the working reference for strategy review.
 
 ## 2. Protected Strategy Surface
 
-These files contain the core trading logic and should be treated as the highest-sensitivity area:
+These files contain the most sensitive trading logic:
 
 - `core/wallet_discovery.py`
-- `core/risk_manager.py`
 - `core/trade_monitor.py`
-- strategic parts of `core/background_tasks.py`
+- `core/risk_manager.py`
+- strategic orchestration in `core/background_tasks.py`
 
-These files support execution and materially affect realized PnL, but are not the wallet-selection strategy itself:
+These files are execution support and materially affect realized PnL, but they are not the wallet-selection thesis itself:
 
 - `core/trade_executor.py`
 - `core/portfolio_tracker.py`
@@ -31,47 +35,44 @@ These files support execution and materially affect realized PnL, but are not th
 
 ## 3. End-to-End Pipeline
 
-The live flow is:
+The bot runs through this flow:
 
-1. Bootstrap / restore:
-   - restore open positions
-   - import seed wallets from `config/wallets.yaml` if DB is empty
-   - run wallet discovery
-   - refresh portfolio
-   - run capital recalc
-   - run trade monitor
-   - run stale-order cleanup
+1. startup / restore
+   - restore positions from DB
+   - sync account positions from Polymarket
+   - load seed wallets
+   - run discovery
+   - recalc capital
 
-2. Discovery:
-   - fetch leaderboard candidates from Polymarket across categories
-   - enrich candidates with hints and trade history
-   - hard-filter each candidate
+2. discovery
+   - fetch leaderboard candidates
+   - enrich with activity and trade history
+   - apply hard filters
    - score survivors
-   - persist top `N` wallets into `qualified_wallets`
+   - persist top wallets as `qualified_wallets`
 
-3. Monitoring:
-   - load enabled qualified wallets ordered by score descending
-   - fetch latest wallet trades
-   - dedupe against already-seen `external_trade_id`
-   - produce copy-trade intents
-   - also produce reconcile-close intents when source positions disappear
+3. trade monitoring
+   - load enabled qualified wallets
+   - fetch latest source-wallet trades
+   - dedupe by `external_trade_id`
+   - shape copy-trade intents
+   - build reconcile-close intents if source positions disappear
 
-4. Risk evaluation:
-   - reject trades outside risk constraints
-   - size the trade
-   - enforce per-wallet, per-position, and total portfolio caps
+4. risk evaluation
+   - block by drawdown / price filter / exposure caps
+   - size trade via proportional copy + light Kelly
+   - reject dust trades
 
-5. Execution:
-   - convert approved intent into order request
-   - submit to Polymarket CLOB
-   - reconcile fills / cancellations / expirations
-   - update local positions and portfolio snapshots
+5. execution
+   - pre-check position caps
+   - pre-check liquidity and price movement
+   - submit order to Polymarket
+   - reconcile fills / cancels / expirations
+   - sync positions again
 
 ## 4. Runtime Jobs and Orchestration
 
-The orchestrator in `core/background_tasks.py` is the runtime controller.
-
-Important recurring jobs:
+The orchestrator in `core/background_tasks.py` controls these recurring jobs:
 
 - `wallet_score_refresh`
 - `trade_monitor`
@@ -80,27 +81,29 @@ Important recurring jobs:
 - `stale_order_cleanup`
 - `capital_recalc`
 
-Important behaviors:
+Important runtime behaviors:
 
-- discovery and trading are decoupled; a wallet can be selected long before its signals arrive
-- trade monitor exits early if `trading_enabled` is false
-- portfolio is recalculated after each executed intent inside the scan loop, so sizing is path-dependent within a single cycle
-- drawdown protection can stop the cycle and close positions before new trades are evaluated
+- discovery and execution are decoupled
+- the bot can hold open positions while no new trades are executed
+- capital is path-dependent within a cycle because exposure and cash are refreshed as trades progress
+- before each trade-monitor cycle in live mode, account positions are synced from the exchange
+
+That pre-cycle sync is now an explicit part of the runtime safety model.
 
 ## 5. Wallet Discovery Architecture
 
-`core/wallet_discovery.py` is the heart of the wallet-selection strategy.
+`core/wallet_discovery.py` is still the center of the wallet-selection logic.
 
 ### 5.1 Candidate sourcing
 
-Candidates are collected from Polymarket leaderboard-style endpoints across:
+Candidates are pulled from Polymarket leaderboard-style endpoints across:
 
 - `OVERALL`
 - `POLITICS`
 - `SPORTS`
 - `CRYPTO`
 
-Each candidate is represented as `CandidateSeed` with possible hints:
+Each seed can carry hints such as:
 
 - `address`
 - `name`
@@ -117,11 +120,7 @@ Each candidate is represented as `CandidateSeed` with possible hints:
 - `volume_hint`
 - `leaderboard_rank_hint`
 
-This matters because a large part of the current strategy depends on what Polymarket exposes directly versus what the bot must infer.
-
 ### 5.2 Qualification thresholds
-
-Thresholds differ by mode.
 
 Aggressive mode defaults:
 
@@ -143,7 +142,7 @@ Conservative mode defaults:
 - `max_consecutive_losses = 4`
 - `min_wallet_age_days = 45`
 
-The important point is that discovery is not permissive. Most candidates are rejected before scoring matters.
+Discovery remains strict. Most candidates still die before ranking matters.
 
 ### 5.3 Hard filters
 
@@ -158,491 +157,508 @@ For each candidate, the bot computes or infers:
 - `wallet_age_days`
 - `pnl_consistency`
 
-The qualification chain is:
+Qualification chain:
 
 1. minimum 90-day trade count
 2. minimum win rate
 3. minimum profit factor
 4. minimum average size
-5. maximum days since last trade
-6. maximum consecutive losses
-7. minimum wallet age
-8. anti-lottery filter using median vs mean PnL
+5. recency gate
+6. consecutive-loss gate
+7. wallet-age gate
+8. anti-lottery consistency check
 
-The anti-lottery rule is notable:
+Important anti-lottery rule:
 
-- if median PnL is negative but mean PnL is positive over a sufficient sample, the wallet is treated as a lottery-style profile and rejected
+- if median PnL is negative but mean PnL is positive over a sufficient sample, the wallet is rejected as lottery-style behavior
 
-This is one of the stronger quality-preserving heuristics in the system.
+### 5.4 Heuristic fallbacks
 
-### 5.4 Fallback heuristics
+When Polymarket does not provide full quality metrics directly, the bot estimates:
 
-Polymarket leaderboard does not always provide all desired metrics directly.
-
-The bot therefore estimates:
-
-- `monthly_pnl_pct` from `pnl / volume` when direct ROI-like values are absent
+- `monthly_pnl_pct` from `pnl / volume`
 - `win_rate_hint` from positive `pnl / vol`
 - `profit_factor_hint` from `(vol + pnl) / (vol - pnl)`
-- `wallet_age_days` from volume, trade count, leaderboard rank, and multi-category presence
+- `wallet_age_days` from leaderboard maturity signals
 
-These heuristics are operationally useful, but they also reduce metric fidelity.
+These heuristics remain useful, but they reduce metric fidelity. Discovery is therefore best understood as "strict filtering with partially inferred quality metrics".
 
-Most important consequence:
+## 6. Updated Score Formula
 
-- in production, many top-ranked wallets collapse onto nearly identical `win_rate` values such as `0.75`
-- this means win rate often acts as a threshold gate, not a strong rank differentiator
-
-## 6. Score Formula
-
-Once a wallet survives all hard filters, it receives a score:
+After the recent changes, score is now:
 
 ```text
+size_component = min(avg_size / 100, 50)
+
 score =
     win_rate * 120
   + monthly_pnl_pct * 80
   + trades_30d_count * 0.6
-  + avg_size / 100
+  + size_component
   + profit_factor * 25
   - days_since_last * 3
   - consecutive_losses * 15
+
+score = max(score - tradability_penalty, 0)
 ```
 
-Interpretation:
+### 6.1 What changed
 
-- `win_rate` rewards consistency
-- `monthly_pnl_pct` rewards efficiency of capital usage
-- `trades_30d_count` rewards current activity
-- `avg_size` rewards larger conviction / larger bankroll wallets
-- `profit_factor` rewards quality of outcome distribution
-- `days_since_last` penalizes stale wallets
-- `consecutive_losses` penalizes recent negative streaks
+Two important changes now materially affect ranking:
 
-### 6.1 Current bias inside the formula
+1. `avg_size` is capped
+   - old behavior: `avg_size / 100` could dominate the score
+   - new behavior: size contributes at most `50` points
 
-The current score is materially biased toward `avg_size`.
+2. tradability penalty is applied
+   - based on the bot's own 14-day execution history for that wallet
+   - low fill-rate wallets are automatically pushed down
 
-Reason:
+### 6.2 Tradability penalty table
 
-- `avg_size / 100` grows linearly without a hard cap
-- large wallets can gain hundreds or thousands of score points from size alone
-- `win_rate` and `profit_factor` contribute much smaller absolute ranges
+If a wallet has at least `5` recent attempts:
 
-Practical consequence:
+- fill rate `< 0.15` => `-100`
+- fill rate `< 0.30` => `-60`
+- fill rate `< 0.50` => `-30`
+- fill rate `< 0.70` => `-10`
+- otherwise `0`
 
-- ranking behaves more like `quality filter + whale sort`
-- the score is useful for excluding weak wallets, but less reliable for fine ordering among strong ones
+This is the most important new bridge between theory and live tradability.
+
+### 6.3 Strategic effect of the update
+
+Before this update, ranking behaved like:
+
+- hard quality gate
+- then sort mostly by wallet size
+
+After this update, ranking is closer to:
+
+- hard quality gate
+- then sort by a mix of quality, recent activity, and actual live-copyability
+
+That is a meaningful strategic change.
 
 ## 7. Final Selection
 
-After scoring:
+Final selection still works as:
 
-- wallets are sorted descending by `score`
-- final enabled set is simply `scored[:enabled_limit]`
+- sort descending by score
+- take the top enabled limit
 
-There is currently no diversification rule in the final selected set.
+Current aggressive wallet cap is `15`, but production currently has only `12` wallets surviving the full pipeline.
 
-That means:
+There is still no diversification constraint in final selection:
 
-- no cap by category
-- no cap by behavior profile
-- no cap by tradability history
+- no category caps
+- no behavior-profile caps
+- no concentration caps
 
-This is one of the biggest structural characteristics of the current strategy.
+That remains a future strategy lever, not a current one.
 
 ## 8. Trade Monitoring Logic
 
-`core/trade_monitor.py` transforms selected wallets into actual copyable intents.
+`core/trade_monitor.py` converts selected wallets into copyable intents.
 
 ### 8.1 Wallet scan
 
-Monitor loads enabled wallets from the database:
-
-- sorted by score descending
-- limited by current risk mode
-
 For each enabled wallet:
 
-- fetch latest wallet trades
-- ignore any trade whose `external_trade_id` already exists locally
-- enforce optional filters:
-  - short-term market toggle
-  - price filter toggle
+- fetch recent wallet trades
+- ignore already-seen `external_trade_id`
+- enforce short-term toggle
+- enforce market blacklist
+- enforce optional price filter
 
-### 8.2 Intent shaping
+### 8.2 New market blacklist
 
-Each trade becomes a `TradeIntent` carrying:
+The bot now blocks clearly problematic short-term markets earlier in the pipeline.
 
-- wallet metadata: score, win rate, PF, average position size
-- market metadata: `market_id`, `token_id`, `outcome`
-- source execution metadata: side, price, size
+Blacklisted slug patterns:
 
-There is also an important anti-spam control:
+- `.*-1h$`
+- `.*-1d$`
+- `.*hourly.*`
+- `.*minute.*`
 
-- `MAX_INTENTS_PER_WALLET = 2`
+Blacklisted category:
 
-This prevents a single wallet from flooding one scan cycle with many sequential trades.
+- `short_term_crypto`
 
-### 8.3 Reconcile-close logic
+This is a signal-layer filter, not an execution-layer error.
 
-Trade monitor also compares:
+### 8.3 Intent shaping
+
+Each intent now carries:
+
+- wallet quality fields
+- market metadata
+- `market_slug`
+- `market_category`
+- source side, price, size
+- short-term flag
+
+### 8.4 Real-time wallet throttling
+
+New per-cycle throttling exists inside the monitor loop:
+
+- each wallet tracks consecutive failures within the current cycle
+- after `5` consecutive failures, that wallet is skipped for the remainder of the cycle
+- success resets the wallet's in-cycle failure counter
+
+This is faster-reacting than the 14-day tradability penalty.
+
+### 8.5 Reconcile-close logic
+
+Monitor still compares:
 
 - source wallet open positions
-- local mirrored open positions
+- local mirrored positions
 
-If the source no longer has a position that the local bot still holds, monitor may emit a synthetic reconcile-close intent.
+If source no longer holds a position, the bot can emit a synthetic close intent.
 
-This is a key part of keeping the copy-book aligned with source behavior.
+This remains important for keeping the copy-book aligned with source behavior.
 
-## 9. Risk Logic
+## 9. Updated Risk Logic
 
-`core/risk_manager.py` answers two questions:
+`core/risk_manager.py` now reflects a more conservative aggressive mode.
 
-1. is this trade allowed at all?
-2. if yes, what size should the bot take?
-
-### 9.1 Portfolio-level gates
+### 9.1 Global gates
 
 Before sizing:
 
 - global drawdown stop can block all trading
 - daily drawdown stop can block all trading
-- optional price filter can reject the trade
+- optional price filter can block by entry price range
 
 ### 9.2 Aggressive mode sizing
 
-Aggressive mode is the main live mode right now.
-
 Core caps:
 
-- `per_wallet_cap = capital * max_per_wallet_pct`
-- `per_position_cap = capital * max_per_position_pct`
-- `total_exposure_cap = capital * max_total_exposure_pct`
+- `per_wallet_cap = capital * 0.15`
+- `per_position_cap = capital * 0.10`
+- `total_exposure_cap = capital * 0.65`
 
-Wallet multiplier:
+Updated wallet multiplier:
 
 ```text
-wallet_multiplier = 0.8 + min(max(wallet_score, 0.0), 1.5) * 0.7
+wallet_multiplier = 0.8 + min(max(wallet_score, 0.0), 1.5) * 0.6
+wallet_multiplier = min(wallet_multiplier, 2.0)
 ```
 
-Then:
+High-conviction boost still exists:
 
-- if source size is more than 2x wallet average trade size and boost is enabled, apply `high_conviction_multiplier`
-- cap multiplier at `2.5`
+- if source trade size is more than 2x wallet average trade size and boost is enabled, multiply by `high_conviction_multiplier`
+- final multiplier is still capped by `2.0`
 
-Light Kelly:
+Updated light Kelly:
 
 ```text
+p = clipped win_rate
+q = 1 - p
+b = clipped profit_factor, max 2.5
+
 kelly = max(((b * p) - q) / b, 0.0)
-light_kelly_fraction = min(kelly * 0.25 * kelly_multiplier, 0.22)
+light_kelly_fraction = min(kelly * 0.20 * kelly_multiplier, 0.15)
 ```
 
-Where:
-
-- `p = win_rate`
-- `q = 1 - p`
-- `b = clipped profit_factor`
-
-Raw size:
+Raw target size:
 
 ```text
-raw_target_size = source_size_usd * wallet_multiplier + capital * kelly_fraction
+raw_target_size =
+    source_size_usd * wallet_multiplier
+  + capital * kelly_fraction
 ```
 
-Then final target size is capped by:
+Final target size is capped by:
 
 - per-position cap
 - remaining wallet capacity
 - remaining total capacity
 - available cash
 
-Important strategic nuance:
+New minimum trade size:
 
-- selection ranking uses the full score range
-- risk sizing clips `wallet_score` at `1.5`
-
-So huge score differences matter a lot for ranking, but much less for position sizing.
+- if final size `< $3.00`, trade is rejected with `size_below_minimum`
 
 ### 9.3 Conservative mode sizing
 
-Conservative mode is intentionally simpler:
+Conservative mode remains simple:
 
-- size is `source_size_usd * 0.15`
-- smaller caps
-- no Kelly component
+- target is `source_size_usd * 0.15`
+- lower caps
+- no Kelly
+- still respects `$3` minimum size
 
-## 10. Trade Execution Logic
+### 9.4 Strategic meaning of the update
 
-`core/trade_executor.py` is the point where strategic signals meet market reality.
+Compared with the earlier live version, the bot is now:
 
-### 10.1 Pre-execution safety
+- less aggressive in Kelly sizing
+- less aggressive in wallet multiplier inflation
+- less willing to open dust positions
 
-Before sending an order:
+This should reduce variance and log noise, at the cost of smaller gross exposure.
 
-- duplicate intent insertion is guarded via `external_trade_id`
-- `SELL` without confirmed local position is skipped
-- market-position precheck can trim or reject size
-- too-small residual position is skipped
-- manual approval can be required for large tickets
+## 10. Updated Execution Logic
 
-### 10.2 Execution plan
+`core/trade_executor.py` is where the latest safety package had the biggest effect.
 
-Execution plan currently depends on:
+### 10.1 New pre-execution safety checks
 
-- source side
-- risk mode
-- slippage limits
-- fill mode
+Before placing an order, the bot now explicitly checks:
 
-The live system has already been modified to be more tolerant on `BUY` than it was originally, but execution still materially constrains realized performance.
+1. `SELL` without confirmed local position
+   - skip with `sell_without_confirmed_position`
 
-### 10.3 Post-submission lifecycle
+2. market position cap pre-check
+   - resize or reject before order placement
 
-A trade can become:
+3. minimum residual size
+   - reject dust after resizing
 
-- `submitted`
-- `partial`
-- `filled`
-- `canceled`
-- `expired`
-- `skipped`
-- `failed`
+4. orderbook tradability
+   - skip if no orderbook
+   - skip if insufficient top-of-book liquidity
 
-These are then reconciled by:
+5. price deviation
+   - compare source price to current best bid/ask
+   - skip if moved by more than `3%`
 
-- fill monitor
-- stale-order cleanup
-- account position sync
+### 10.2 Liquidity pre-check
 
-## 11. Current Live Snapshot
+The bot now loads the orderbook before sending the order and computes:
 
-Live status snapshot used for this document:
+- top-5 ask notional for `BUY`
+- top-5 bid notional for `SELL`
+
+Required liquidity:
+
+```text
+required = max(target_size_usd * 1.5, 15)
+```
+
+If available liquidity is below that threshold, the trade is skipped early.
+
+This is intended to prevent wasting order attempts on effectively empty markets.
+
+### 10.3 Inventory-aware sells
+
+For `SELL`, the bot now:
+
+- requires confirmed local position
+- trims sell size to what is actually available
+- rejects if the residual is too small
+
+This is important after manual closes or source/local desync.
+
+### 10.4 Price movement guard
+
+The bot compares source execution price to the current best price:
+
+- `BUY` uses current best ask
+- `SELL` uses current best bid
+
+If deviation exceeds `3%`, the trade is skipped.
+
+This is the meaning of reasons like:
+
+- `price_moved:45.6%`
+
+That skip is intentional protection against late, degraded fills.
+
+### 10.5 Order types and lifecycle
+
+Current behavior is still:
+
+- `BUY` in aggressive flow uses `GTC` with fill monitoring and one controlled reprice path
+- statuses can become `submitted`, `partial`, `filled`, `canceled`, `expired`, `skipped`, `failed`
+
+Stale-order cleanup and fill reconciliation remain part of the lifecycle.
+
+## 11. Polymarket Client Changes
+
+`data/polymarket_client.py` now carries part of the runtime safety model.
+
+### 11.1 Price validation
+
+Valid price range:
+
+- minimum valid price: `0.01`
+- maximum valid price: `0.99`
+
+Invalid prices return `invalid_price` and are skipped.
+
+This is designed to avoid pathological low-price and near-1.00 markets that are hard to size safely.
+
+### 11.2 Orderbook snapshot support
+
+The client now exposes a parsed orderbook snapshot:
+
+- `bids`
+- `asks`
+- `best_bid`
+- `best_ask`
+
+This is what makes the new liquidity and price-movement guards possible.
+
+## 12. Position Sync Model
+
+Production now syncs exchange positions at two important moments:
+
+1. regular portfolio refresh
+2. explicitly before each trade-monitor cycle in live mode
+
+Practical consequence:
+
+- manual closes outside the bot are less likely to leave stale mirrored state
+- sell-side intent validation is now stricter because the bot checks confirmed inventory more often
+
+This does not guarantee perfect sync in all edge cases, but it is materially safer than the older runtime.
+
+## 13. Current Live Snapshot
+
+Current production snapshot referenced here:
 
 - `risk_mode = aggressive`
-- `tracked_wallets = 14`
-- `discovery_scanned_candidates = 153`
-- `discovery_passed_filters = 14`
-- `total_equity_usd = 62.6920`
-- `exposure_usd = 20.4329`
-- `available_cash_usd = 35.3093`
+- `tracked_wallets = 12`
+- `discovery_scanned_candidates = 151`
+- `discovery_passed_filters = 12`
+- `seed_wallets.enabled = 12`
+- `seed_wallets.avg_score = 202.7075`
+- `total_equity_usd = 63.8685`
+- `exposure_usd = 14.1583`
+- `available_cash_usd = 42.7604`
 - `open_order_reserve_usd = 6.9498`
-- `daily_pnl_usd = -10.4912`
-- `cumulative_pnl_usd = -6.0277`
-- `daily_drawdown_pct = 14.34%`
+- `open_positions = 8`
+- `daily_pnl_usd = -6.6092`
+- `cumulative_pnl_usd = -4.8512`
 
 Interpretation:
 
-- discovery is working and not empty
-- the bot is live, active, and carrying real positions
-- current realized / marked-to-market performance is weak
+- the new discovery logic is live
+- selection is stricter than before the recent update
+- score inflation from oversized `avg_size` is gone
+- the bot is live and holds real open positions
 
-## 12. Live Trade Quality Snapshot
+## 14. Current Production Trade Tape
 
-Based on the latest 80 live trades:
+Fresh post-deploy trades show the new guards in action.
 
-### 12.1 Status distribution
+Recent examples:
 
-- `filled = 2`
-- `failed = 31`
-- `skipped = 41`
-- `canceled = 4`
-- `expired = 2`
+- `2026-03-07 02:51:44 UTC`
+  - wallet `0x05e26c...6e12`
+  - `BUY`
+  - status `skipped`
+  - reason `price_moved:45.6%`
 
-Approximate fill rate over this window:
+- `2026-03-07 02:45:47 UTC`
+  - wallet `0x05e26c...6e12`
+  - `SELL`
+  - status `skipped`
+  - reason `sell_without_confirmed_position`
 
-- `2 / 80 = 2.5%`
+These are useful examples because they prove:
 
-### 12.2 Main failure reasons
+- new guards are active in production
+- the bot is still seeing live source-wallet signals
+- the bot is deliberately refusing low-quality or invalid copy attempts
 
-- `21` `orderbook_not_found`
-- `20` `no orders found to match with FAK order`
-- `11` `insufficient_balance_allowance`
-- `9` `float division by zero`
-- `4` `canceled_without_fill`
-- `3` `market_position_cap_reached`
+## 15. What Improved After the Latest Update
 
-### 12.3 Category mix
+The recent P0/P1/P2 package materially changed the system in these ways.
 
-- `Politics = 30`
-- `Sports = 22`
-- `Crypto = 18`
-- `Iran = 10`
+### 15.1 Better selection quality
 
-### 12.4 Wallet concentration in the latest 80 trades
+- `avg_size` no longer dominates ranking
+- wallets with poor live fill-rate are penalized
+- low-value dust trades are filtered out
 
-- `0x20a2f72aeb2f1643752ee380adacbfaa04ecdc15` -> `25`
-- `0x0d15e2724df455f9e65b15104d21d76412a2c454` -> `18`
-- `0x36946572d760b5b1a50cfcd213ba901f1cd4c5ae` -> `18`
-- `0xce71bed9dd1418abc34d244730879d795e8683bc` -> `16`
-- `0xc65ca4755436f82d8eb461e65781584b8cadea39` -> `3`
+### 15.2 Better signal hygiene
 
-This means `77 / 80` recent trade attempts came from just 4 wallets.
+- blacklisted short-term market patterns are rejected earlier
+- in-cycle throttling reduces repeated low-value attempts from failing wallets
 
-## 13. Practical Review of the Active Wallet Subset
+### 15.3 Better execution hygiene
 
-This section is not a ranking of all selected wallets. It is a runtime review of the wallets that are actually driving the recent live tape.
+- sell attempts require actual inventory
+- orderbook liquidity is checked before submission
+- price movement is checked before submission
+- invalid prices are blocked at the client level
 
-### 13.1 `0x20a2...dc15`
+### 15.4 Better runtime safety
 
-Current reading:
+- account positions are synced before each live trade cycle
+- manual closes outside the bot are less likely to poison subsequent sells
 
-- the most important recent source
-- produced both actual fills and multiple failures
-- drives a lot of Sports and Iran flow
+## 16. What Still Limits Live Performance
 
-Interpretation:
+The system is cleaner now, but several realities still limit realized PnL.
 
-- operationally useful because it generates live opportunities
-- operationally noisy because it also drives thin and low-price markets
-- best described as a high-signal but dirty source
+### 16.1 Execution still blocks many signals
 
-### 13.2 `0x0d15...c454`
+Even with better guards, some signals remain hard to trade because:
 
-Current reading:
+- source wallets act in thin markets
+- price moves too fast before the bot arrives
+- some markets still lack usable orderbooks
 
-- heavily active
-- a large share of recent attempts fail with `FAK no match`
+### 16.2 Heuristic discovery metrics still matter
 
-Interpretation:
+Discovery quality is improved, but not fully "ground truth" because:
 
-- not necessarily a bad trader
-- but in the current runtime profile this wallet produces many signals that the bot cannot reproduce at acceptable price / liquidity
+- win rate and PF are still partly inferred from upstream data
+- leaderboard hints remain part of wallet evaluation
 
-### 13.3 `0x3694...c5ae`
+### 16.3 Final selected set is still not diversified
 
-Current reading:
+The bot still picks the top scored wallets without category caps.
 
-- almost entirely routes the bot into short-term crypto
-- recent stream is dominated by `orderbook_not_found`
+That means:
 
-Interpretation:
+- concentration risk is still structurally possible
+- a small number of similarly behaving wallets can dominate live flow
 
-- currently toxic for this runtime
-- not because the wallet is necessarily bad
-- but because the bot cannot convert its flow into executable orders reliably
+## 17. Current End-to-End Assessment
 
-### 13.4 `0xce71...83bc`
+### 17.1 Wallet selection alone
 
-Current reading:
-
-- many recent `SELL`-oriented attempts
-- often collides with `insufficient_balance_allowance`
-
-Interpretation:
-
-- strategy match is poor unless local inventory alignment is clean
-- manual user closes and source/local desync make this wallet harder to mirror than a buy-dominant source
-
-## 14. Strengths of the Current Trading Logic
-
-The current strategy is stronger than a naive copy bot in several ways:
-
-1. Discovery is strict.
-   - only a small minority of candidates survive
-
-2. It is multi-factor.
-   - win rate, PF, activity, recency, age, losses, and size all matter
-
-3. It has anti-lottery protection.
-   - median-negative / mean-positive behavior is explicitly filtered
-
-4. It separates wallet selection from risk sizing.
-   - this allows good sources to remain selected even if ticket size is constrained
-
-5. It supports source-position reconciliation.
-   - this is important for staying aligned with copied wallets over time
-
-## 15. Weaknesses of the Current Trading Logic
-
-These are the biggest strategic weaknesses as of the current GitHub version.
-
-### 15.1 Ranking is too size-sensitive
-
-The score overweights `avg_size`, which makes large bankrolls dominate ranking even when quality edge is not proportionally higher.
-
-### 15.2 Key metrics are partly heuristic
-
-When Polymarket does not provide direct win rate and profit factor, the bot estimates them from `pnl / volume`.
-
-This is useful, but it means:
-
-- rank order is partly inferred, not observed
-- many strong wallets collapse into very similar metric values
-
-### 15.3 Final selected set is not diversification-aware
-
-The bot simply takes the top `N` by score.
-
-It does not ask:
-
-- are these wallets too behaviorally similar?
-- do they over-concentrate on one category?
-- do they produce signals the current executor can realistically trade?
-
-### 15.4 Selection is not tradability-aware
-
-Current selection quality is judged before the execution layer has its say.
-
-In practice, some wallets route the bot into:
-
-- nonexistent orderbooks
-- ultra-thin markets
-- precision edge cases
-- low-price markets that the current order builder mishandles
-
-This is the biggest gap between theoretical source quality and realized bot quality.
-
-## 16. Current End-to-End Assessment
-
-### 16.1 Wallet selection alone
-
-Assessment: `6.5 / 10`
+Assessment: `7 / 10`
 
 Why:
 
-- good structure
-- strict filtering
-- meaningful anti-noise gates
-- but ranking is distorted by size and proxy metrics
+- strict qualification
+- better ranking after `avg_size` cap
+- tradability penalty now grounds ranking in live experience
+- still partly heuristic and still not diversification-aware
 
-### 16.2 Live realized trading
+### 17.2 Live realized trading
 
-Assessment: `3 / 10`
+Assessment: `4.5 / 10`
 
 Why:
 
-- the wallet selection engine is producing signals
-- but too few signals become high-quality fills
-- live PnL is currently weak
+- the bot is safer and cleaner than before
+- it now rejects obviously bad copy attempts earlier
+- but live PnL is still modest and execution frictions remain substantial
 
-## 17. High-Impact Levers Inside the Strategy
+This is an improvement over the earlier state, but not yet "fully tuned".
 
-These are the three highest-impact strategy levers identified during review. They are listed here for analysis only, not as approved changes.
+## 18. High-Impact Future Levers
 
-1. reduce the dominance of `avg_size` in score
-2. add tradability-aware selection feedback
-3. add diversification constraints to the final enabled set
+These are analysis points only, not approved changes.
 
-These are strategy-level changes and should not be implemented without explicit approval.
+1. diversification-aware final wallet selection
+2. deeper tradability-aware ranking by category / market type
+3. additional execution tuning once the new safety baseline stabilizes
 
-## 18. Non-Strategy Runtime Issues That Distort Evaluation
+Because the latest update already changed both ranking and execution safety, the next strategy changes should be evaluated against a fresh live window, not against stale historical tape.
 
-These issues are outside the wallet-selection thesis, but they materially distort performance reading:
+## 19. Recommended Reading Order
 
-1. low-price execution bug in `data/polymarket_client.py`
-   - very cheap markets can round to `0.00`, causing `float division by zero`
-
-2. missing or thin orderbooks
-   - especially in short-term crypto and some sports markets
-
-3. inventory / allowance mismatch on some sells
-   - worsened when positions are manually closed outside the bot
-
-Without controlling for these, it is hard to judge the strategy purely by PnL.
-
-## 19. Recommended Reading Order for Future Review
-
-If reviewing the strategy from scratch, use this order:
+If reviewing the current strategy from scratch, use this order:
 
 1. `config/settings.py`
 2. `core/wallet_discovery.py`
@@ -652,29 +668,28 @@ If reviewing the strategy from scratch, use this order:
 6. `data/polymarket_client.py`
 7. `core/background_tasks.py`
 
-This order moves from thesis to signal generation to execution reality.
+This order moves from strategy thesis to signal generation to risk to execution reality.
 
 ## 20. Bottom Line
 
-The core idea of the bot is intact:
+The latest version of the bot is meaningfully different from the earlier live build.
 
-- discover strong Polymarket wallets
-- filter aggressively
-- mirror only a selected subset
-- size trades according to portfolio constraints and wallet quality
+What is now better:
 
-What is working:
+- wallet ranking is less distorted by wallet size
+- wallets that are poor to copy in practice are penalized
+- dust trades are removed
+- short-term toxic markets are filtered earlier
+- execution safety is much stronger
+- manual-close desync is handled more safely
 
-- strict qualification
-- nontrivial filtering
-- live signal generation
+What still needs observation, not immediate redesign:
 
-What is not yet working well enough:
+- actual fill quality after the new guardrails
+- concentration of flow among the currently selected wallets
+- realized PnL over a fresh post-update sample
 
-- accurate fine-grained ranking among good wallets
-- translation of selected-wallet flow into executable, profitable live trades
+The system is now best described as:
 
-The current system is therefore best described as:
-
-- a strategy engine with a meaningful selection thesis
-- paired with an execution layer that still prevents that thesis from fully expressing itself in production
+- a stricter, more execution-aware copy-trading engine
+- still dependent on live market tradability for realized edge
