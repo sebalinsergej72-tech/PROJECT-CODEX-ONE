@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from data.polymarket_client import OrderRequest, PolymarketClient
 
 
@@ -96,3 +98,25 @@ def test_place_order_sync_uses_limit_order_builder_for_sell() -> None:
     assert fake.limit_order_args.price == 0.63
     assert fake.market_order_args is None
     assert fake.posted_order["kind"] == "limit"
+
+
+def test_place_order_sync_rejects_invalid_low_price() -> None:
+    client = PolymarketClient()
+    fake = _FakeClobClient()
+    client._ensure_clob_client = lambda: fake  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="invalid_price"):
+        client._place_order_sync(
+            OrderRequest(
+                token_id="token-low",
+                side="buy",
+                price_cents=0.1,
+                size_usd=5.0,
+                market_id="market-low",
+                outcome="Yes",
+                order_type="GTC",
+            )
+        )
+
+    assert fake.market_order_args is None
+    assert fake.limit_order_args is None

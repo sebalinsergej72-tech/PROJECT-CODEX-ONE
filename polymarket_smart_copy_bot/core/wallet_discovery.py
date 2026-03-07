@@ -7,11 +7,12 @@ from statistics import median
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode, settings
 from data.polymarket_client import PolymarketClient
+from models.models import CopiedTrade, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import WalletConfig, load_wallets, utc_now
 from utils.notifications import NotificationService
@@ -184,7 +185,8 @@ class WalletDiscovery:
 
         scored: list[ScoredWallet] = []
         if candidates:
-            scored, rejected_reasons, counters = await self._score_candidates(candidates, thresholds)
+            execution_stats = await self._load_recent_execution_stats(session, days=14)
+            scored, rejected_reasons, counters = await self._score_candidates(candidates, thresholds, execution_stats)
             scored.sort(key=lambda row: row.score, reverse=True)
         else:
             rejected_reasons["no_candidates"] = 1
@@ -403,13 +405,19 @@ class WalletDiscovery:
         self,
         seeds: dict[str, CandidateSeed],
         thresholds: DiscoveryThresholds,
+        execution_stats: dict[str, tuple[int, int]],
     ) -> tuple[list[ScoredWallet], dict[str, int], DiscoveryCounters]:
         limiter = asyncio.Semaphore(8)
         now = utc_now()
 
         async def run(seed: CandidateSeed) -> tuple[ScoredWallet | None, str | None, CandidateProgress]:
             async with limiter:
-                return await self._score_single_wallet(seed, now, thresholds)
+                return await self._score_single_wallet(
+                    seed,
+                    now,
+                    thresholds,
+                    execution_stats.get(seed.address.lower()),
+                )
 
         tasks = [run(seed) for seed in seeds.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -456,6 +464,7 @@ class WalletDiscovery:
         seed: CandidateSeed,
         now: datetime,
         thresholds: DiscoveryThresholds,
+        execution_stats: tuple[int, int] | None,
     ) -> tuple[ScoredWallet | None, str | None, CandidateProgress]:
         progress = CandidateProgress()
 
@@ -581,15 +590,17 @@ class WalletDiscovery:
         if monthly_pnl_pct == 0.0 and volume_30d > 0:
             monthly_pnl_pct = pnl_30d / volume_30d
 
+        size_component = min(avg_size / 100, settings.avg_size_score_cap)
         score = (
             win_rate * 120
             + monthly_pnl_pct * 80
             + trades_30d_count * 0.6
-            + (avg_size / 100)
+            + size_component
             + profit_factor * 25
             - days_since_last * 3
             - consecutive_losses * 15
         )
+        score = max(score - self._tradability_penalty(execution_stats), 0.0)
 
         return (
             ScoredWallet(
@@ -610,6 +621,57 @@ class WalletDiscovery:
             None,
             progress,
         )
+
+    @staticmethod
+    def _tradability_penalty(execution_stats: tuple[int, int] | None) -> float:
+        if execution_stats is None:
+            return 0.0
+        attempts, fills = execution_stats
+        if attempts < settings.min_attempts_for_tradability_penalty:
+            return 0.0
+
+        fill_rate = fills / attempts if attempts > 0 else 0.0
+        if fill_rate < 0.15:
+            return 100.0
+        if fill_rate < 0.30:
+            return 60.0
+        if fill_rate < 0.50:
+            return 30.0
+        if fill_rate < 0.70:
+            return 10.0
+        return 0.0
+
+    @staticmethod
+    async def _load_recent_execution_stats(
+        session: AsyncSession,
+        *,
+        days: int,
+    ) -> dict[str, tuple[int, int]]:
+        cutoff = utc_now() - timedelta(days=max(days, 1))
+        query = select(
+            CopiedTrade.wallet_address,
+            func.count(CopiedTrade.id),
+            func.sum(
+                case(
+                    (
+                        CopiedTrade.status.in_([TradeStatus.FILLED.value, TradeStatus.PARTIAL.value]),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+        ).where(
+            CopiedTrade.copied_at >= cutoff,
+            CopiedTrade.status != TradeStatus.PENDING.value,
+        ).group_by(CopiedTrade.wallet_address)
+
+        rows = (await session.execute(query)).all()
+        stats: dict[str, tuple[int, int]] = {}
+        for wallet_address, attempts, fills in rows:
+            if wallet_address is None:
+                continue
+            stats[str(wallet_address).lower()] = (int(attempts or 0), int(fills or 0))
+        return stats
 
     async def _request_top_wallet_approval(self, wallet: ScoredWallet) -> bool:
         if not self.notifications.enabled:

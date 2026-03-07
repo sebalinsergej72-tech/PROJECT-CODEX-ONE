@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,12 +32,38 @@ class TradeIntent:
     source_price_cents: float
     source_size_usd: float
     is_short_term: bool
+    market_slug: str | None = None
+    market_category: str | None = None
+
+
+class WalletThrottler:
+    def __init__(self) -> None:
+        self.cycle_failures: defaultdict[str, int] = defaultdict(int)
+
+    def record_failure(self, wallet_address: str) -> None:
+        self.cycle_failures[wallet_address.lower()] += 1
+
+    def record_success(self, wallet_address: str) -> None:
+        self.cycle_failures[wallet_address.lower()] = 0
+
+    def is_throttled(self, wallet_address: str) -> bool:
+        return self.cycle_failures[wallet_address.lower()] >= settings.max_consecutive_wallet_failures_per_cycle
+
+    def reset_cycle(self) -> None:
+        self.cycle_failures.clear()
 
 
 class TradeMonitor:
     """Monitors qualified wallets and extracts copy-trade candidates."""
 
     ACCOUNT_SYNC_WALLET = "account_sync"
+    MARKET_BLACKLIST_PATTERNS = (
+        re.compile(r".*-1h$", re.IGNORECASE),
+        re.compile(r".*-1d$", re.IGNORECASE),
+        re.compile(r".*hourly.*", re.IGNORECASE),
+        re.compile(r".*minute.*", re.IGNORECASE),
+    )
+    CATEGORY_BLACKLIST = {"short_term_crypto"}
 
     def __init__(
         self,
@@ -174,6 +202,9 @@ class TradeMonitor:
             if is_short and not short_term_enabled:
                 continue
 
+            if not TradeMonitor._is_market_tradeable(signal=signal, is_short_term=is_short):
+                continue
+
             if price_filter_enabled and not (settings.price_min_cents <= signal.price_cents <= settings.price_max_cents):
                 continue
 
@@ -192,6 +223,8 @@ class TradeMonitor:
                     source_price_cents=signal.price_cents,
                     source_size_usd=signal.size_usd,
                     is_short_term=is_short,
+                    market_slug=signal.market_slug,
+                    market_category=signal.market_category,
                 )
             )
 
@@ -262,6 +295,8 @@ class TradeMonitor:
                     # 0 triggers full-close sizing in TradeExecutor._derive_close_size_usd
                     source_size_usd=0.0,
                     is_short_term=False,
+                    market_slug=None,
+                    market_category=None,
                 )
             )
         return intents
@@ -273,5 +308,15 @@ class TradeMonitor:
 
     @staticmethod
     def _is_short_term_signal(signal: WalletTradeSignal) -> bool:
-        text = f"{signal.market_id} {signal.outcome}".lower()
+        text = f"{signal.market_id} {signal.outcome} {signal.market_slug or ''}".lower()
         return any(token in text for token in ("5 min", "5m", "15 min", "15m", "hourly", "1h"))
+
+    @classmethod
+    def _is_market_tradeable(cls, *, signal: WalletTradeSignal, is_short_term: bool) -> bool:
+        category = (signal.market_category or "").strip().lower()
+        slug = (signal.market_slug or signal.market_id or "").strip().lower()
+        if category in cls.CATEGORY_BLACKLIST:
+            return False
+        if is_short_term and "crypto" in category:
+            return False
+        return not any(pattern.match(slug) for pattern in cls.MARKET_BLACKLIST_PATTERNS)

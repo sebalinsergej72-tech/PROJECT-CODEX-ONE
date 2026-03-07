@@ -12,7 +12,7 @@ from config.settings import FillMode, RiskMode, settings
 from core.portfolio_tracker import PortfolioTracker
 from core.risk_manager import PortfolioState, RiskManager
 from core.trade_monitor import TradeIntent
-from data.polymarket_client import OrderRequest, PolymarketClient
+from data.polymarket_client import OrderRequest, OrderbookSnapshot, PolymarketClient
 from models.models import CopiedTrade, ManualApproval, Position, TradeSide, TradeStatus
 from utils.notifications import NotificationService
 
@@ -70,8 +70,8 @@ class TradeExecutor:
         fill_mode: FillMode = "conservative",
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
-    ) -> None:
-        await self.execute_copy_trade(
+    ) -> str | None:
+        return await self.execute_copy_trade(
             session,
             intent,
             portfolio_state,
@@ -91,7 +91,7 @@ class TradeExecutor:
         fill_mode: FillMode = "conservative",
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
-    ) -> None:
+    ) -> str | None:
         intent_side = intent.side.lower()
         copied_trade = CopiedTrade(
             external_trade_id=intent.external_trade_id,
@@ -113,7 +113,7 @@ class TradeExecutor:
             # Cross-worker race: the same external trade can be inserted concurrently.
             if self._is_duplicate_external_trade(exc):
                 logger.debug("Duplicate trade ignored: {}", intent.external_trade_id)
-                return
+                return None
             raise
 
         existing_position = await self._find_open_position(
@@ -129,7 +129,7 @@ class TradeExecutor:
             copied_trade.status = TradeStatus.SKIPPED.value
             copied_trade.reason = "sell_without_confirmed_position"
             logger.info("Trade {} skipped: sell_without_confirmed_position", intent.external_trade_id)
-            return
+            return copied_trade.status
 
         target_size_usd = 0.0
         wallet_multiplier = 1.0
@@ -146,7 +146,7 @@ class TradeExecutor:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "mirror_close_zero_size"
                 logger.info("Trade {} skipped: mirror_close_zero_size", intent.external_trade_id)
-                return
+                return copied_trade.status
         else:
             wallet_current_exposure = await self._wallet_current_exposure_usd(session, intent.wallet_address)
 
@@ -168,7 +168,7 @@ class TradeExecutor:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = decision.reason
                 logger.info("Trade {} skipped: {}", intent.external_trade_id, decision.reason)
-                return
+                return copied_trade.status
 
             target_size_usd = decision.target_size_usd
             wallet_multiplier = decision.wallet_multiplier
@@ -186,7 +186,7 @@ class TradeExecutor:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "market_position_cap_reached"
                 logger.info("Trade {} skipped: market_position_cap_reached", intent.external_trade_id)
-                return
+                return copied_trade.status
             if precheck_size < target_size_usd:
                 logger.warning(
                     "Trade {} resized by market cap pre-check: requested=${:.2f} allowed=${:.2f} market={}",
@@ -201,14 +201,38 @@ class TradeExecutor:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "below_min_position_size_after_market_cap"
                 logger.info("Trade {} skipped: below_min_position_size_after_market_cap", intent.external_trade_id)
-                return
+                return copied_trade.status
+
+        if intent_side == TradeSide.SELL.value and existing_position is not None:
+            target_size_usd, sell_reason = self._validate_sell_size_against_position(
+                position=existing_position,
+                requested_size_usd=target_size_usd,
+                execution_price_cents=intent.source_price_cents,
+            )
+            if sell_reason is not None:
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = sell_reason
+                logger.info("Trade {} skipped: {}", intent.external_trade_id, sell_reason)
+                return copied_trade.status
 
         if requires_manual_confirmation:
             approved = await self._request_manual_confirmation(session, copied_trade, target_size_usd)
             if not approved:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "manual_rejection_or_timeout"
-                return
+                return copied_trade.status
+
+        orderbook = await self.polymarket_client.fetch_orderbook(intent.token_id)
+        tradable, tradability_reason = self._check_market_tradability(
+            intent=intent,
+            orderbook=orderbook,
+            target_size_usd=target_size_usd,
+        )
+        if not tradable:
+            copied_trade.status = TradeStatus.SKIPPED.value
+            copied_trade.reason = tradability_reason
+            logger.info("Trade {} skipped: {}", intent.external_trade_id, tradability_reason)
+            return copied_trade.status
 
         # Persist the bot-calculated intended size even if execution later fails.
         copied_trade.size_usd = target_size_usd
@@ -222,7 +246,7 @@ class TradeExecutor:
             copied_trade.status = TradeStatus.SKIPPED.value
             copied_trade.reason = "slippage_above_hard_limit"
             logger.warning("Trade {} skipped: slippage_above_hard_limit", intent.external_trade_id)
-            return
+            return copied_trade.status
 
         result = await self.polymarket_client.place_order(
             execution_plan.order_request
@@ -238,19 +262,24 @@ class TradeExecutor:
                     intent.external_trade_id,
                     intent.token_id,
                 )
-                return
+                return copied_trade.status
             if error_text == "insufficient_balance_allowance":
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "insufficient_balance_allowance"
                 logger.warning("Trade {} skipped: insufficient balance/allowance", intent.external_trade_id)
-                return
+                return copied_trade.status
+            if error_text == "invalid_price":
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "invalid_price"
+                logger.info("Trade {} skipped: invalid price", intent.external_trade_id)
+                return copied_trade.status
 
             copied_trade.status = TradeStatus.FAILED.value
             copied_trade.reason = result.error
             await self.notifications.send_message(
                 f"[FAILED] {intent.market_id} {intent.outcome} {intent.side.upper()} | reason={result.error}"
             )
-            return
+            return copied_trade.status
 
         copied_trade.status = TradeStatus.SUBMITTED.value
         copied_trade.order_id = result.order_id
@@ -317,7 +346,7 @@ class TradeExecutor:
                 f"[SUBMITTED:{risk_mode}] {intent.market_id} {intent.outcome} {intent.side.upper()} | "
                 f"${target_size_usd:.2f}"
             )
-            return
+            return copied_trade.status
 
         if copied_trade.status in {TradeStatus.PARTIAL.value, TradeStatus.FILLED.value}:
             actual_slippage_bps = self.risk_manager.compute_slippage_bps(
@@ -337,7 +366,9 @@ class TradeExecutor:
                 f"${copied_trade.filled_size_usd:.2f} @ {copied_trade.filled_price_cents:.2f}c "
                 f"(slippage {actual_slippage_bps:+.2f}bps)"
             )
-            return
+            return copied_trade.status
+
+        return copied_trade.status
 
     async def reconcile_open_trade_states(self, session: AsyncSession) -> None:
         """Reconcile submitted/partial live trades against authoritative CLOB fills."""
@@ -522,6 +553,37 @@ class TradeExecutor:
             requested_slippage_bps=requested_slippage_bps,
             order_type=order_type,
         )
+
+    def _check_market_tradability(
+        self,
+        *,
+        intent: TradeIntent,
+        orderbook: OrderbookSnapshot | None,
+        target_size_usd: float,
+    ) -> tuple[bool, str | None]:
+        if orderbook is None:
+            return False, "no_orderbook"
+
+        side = intent.side.lower()
+        levels = orderbook.asks[:5] if side == TradeSide.BUY.value else orderbook.bids[:5]
+        available_usd = sum(level.price * level.size for level in levels)
+        required_usd = max(
+            target_size_usd * settings.liquidity_buffer_multiplier,
+            settings.min_orderbook_liquidity_usd,
+        )
+        if available_usd < required_usd:
+            return False, f"low_liquidity:{available_usd:.2f}<{required_usd:.2f}"
+
+        current_price = orderbook.best_ask if side == TradeSide.BUY.value else orderbook.best_bid
+        if current_price is None:
+            return False, "no_price_available"
+
+        source_price = max(intent.source_price_cents / 100.0, settings.min_valid_price)
+        deviation = abs(current_price - source_price) / source_price
+        if deviation > settings.max_price_deviation_pct:
+            return False, f"price_moved:{deviation:.1%}"
+
+        return True, None
 
     async def _apply_market_position_precheck(
         self,
@@ -727,9 +789,7 @@ class TradeExecutor:
 
     @staticmethod
     def _minimum_position_size(*, portfolio_state: PortfolioState, risk_mode: RiskMode) -> float:
-        if risk_mode == "aggressive":
-            return 1.5 if portfolio_state.total_equity_usd < 150 else 2.0
-        return 2.0
+        return max(settings.min_trade_size_usd, 0.0)
 
     @staticmethod
     def _derive_close_size_usd(*, position: Position, source_size_usd: float, execution_price_cents: float) -> float:
@@ -739,6 +799,22 @@ class TradeExecutor:
         if requested <= 0:
             requested = full_close_notional
         return round(min(full_close_notional, requested), 2)
+
+    @staticmethod
+    def _validate_sell_size_against_position(
+        *,
+        position: Position,
+        requested_size_usd: float,
+        execution_price_cents: float,
+    ) -> tuple[float, str | None]:
+        available_size_usd = round(max(position.quantity, 0.0) * max(execution_price_cents / 100.0, 0.01), 2)
+        if available_size_usd <= 0:
+            return 0.0, "no_position_to_sell"
+
+        trimmed_size = min(max(requested_size_usd, 0.0), available_size_usd)
+        if trimmed_size < settings.min_trade_size_usd:
+            return 0.0, "residual_too_small"
+        return round(trimmed_size, 2), None
 
     async def _apply_dry_run_fill(
         self,

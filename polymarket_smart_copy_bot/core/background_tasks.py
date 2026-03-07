@@ -15,7 +15,7 @@ from config.settings import FillMode, RiskMode, settings
 from core.portfolio_tracker import PortfolioTracker
 from core.risk_manager import PortfolioState, RiskManager
 from core.trade_executor import TradeExecutor
-from core.trade_monitor import TradeMonitor
+from core.trade_monitor import TradeMonitor, WalletThrottler
 from core.wallet_discovery import WalletDiscovery
 from data.database import AsyncSessionFactory, get_scheduler_jobstore_url
 from data.polymarket_client import PolymarketClient
@@ -393,6 +393,8 @@ class BackgroundOrchestrator:
 
     async def _trade_monitor_scan(self, session: AsyncSession) -> None:
         await self.trade_executor.reconcile_open_trade_states(session)
+        if not self._dry_run:
+            await self.portfolio_tracker.sync_account_open_positions(session)
 
         if not self._trading_enabled:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
@@ -415,8 +417,13 @@ class BackgroundOrchestrator:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
             return
 
+        throttler = WalletThrottler()
         for intent in intents:
-            await self.trade_executor.execute_intent(
+            if throttler.is_throttled(intent.wallet_address):
+                logger.info("Wallet {} throttled for this scan cycle", intent.wallet_address[:10])
+                continue
+
+            status = await self.trade_executor.execute_intent(
                 session,
                 intent,
                 portfolio,
@@ -425,6 +432,10 @@ class BackgroundOrchestrator:
                 price_filter_enabled=self._price_filter_enabled,
                 high_conviction_boost_enabled=self._high_conviction_boost_enabled,
             )
+            if status in {TradeStatus.FILLED.value, TradeStatus.PARTIAL.value, TradeStatus.SUBMITTED.value}:
+                throttler.record_success(intent.wallet_address)
+            elif status is not None:
+                throttler.record_failure(intent.wallet_address)
             portfolio = await self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode)
 
         self.last_trade_scan_at = datetime.now(tz=timezone.utc)

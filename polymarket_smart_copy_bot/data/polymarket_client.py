@@ -27,6 +27,8 @@ class WalletTradeSignal:
     size_usd: float
     traded_at: datetime
     profit_usd: float | None = None
+    market_slug: str | None = None
+    market_category: str | None = None
 
 
 @dataclass(slots=True)
@@ -95,6 +97,20 @@ class FillInfo:
     size_usd: float
     traded_at: datetime
     raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class OrderbookLevel:
+    price: float
+    size: float
+
+
+@dataclass(slots=True)
+class OrderbookSnapshot:
+    bids: list[OrderbookLevel]
+    asks: list[OrderbookLevel]
+    best_bid: float | None
+    best_ask: float | None
 
 
 class PolymarketClient:
@@ -282,6 +298,14 @@ class PolymarketClient:
                     size_usd=raw_size,
                     traded_at=traded_at,
                     profit_usd=profit_value,
+                    market_slug=str(
+                        item.get("marketSlug") or item.get("market_slug") or item.get("slug") or ""
+                    ).strip()
+                    or None,
+                    market_category=str(
+                        item.get("marketCategory") or item.get("category") or ""
+                    ).strip()
+                    or None,
                 )
             )
 
@@ -373,6 +397,31 @@ class PolymarketClient:
                 return ensure_price_in_cents(price)
 
         return None
+
+    async def fetch_orderbook(self, token_id: str | None) -> OrderbookSnapshot | None:
+        """Fetch a token orderbook snapshot from the CLOB REST API."""
+
+        normalized_token = str(token_id or "").strip()
+        if not normalized_token:
+            return None
+        if normalized_token in self._missing_orderbooks:
+            return None
+
+        url = f"{settings.polymarket_host.rstrip('/')}/book"
+        try:
+            raw = await self._request_json("GET", url, params={"token_id": normalized_token})
+        except Exception as exc:
+            text = str(exc).lower()
+            if "orderbook" in text and "does not exist" in text:
+                self._missing_orderbooks.add(normalized_token)
+                return None
+            logger.warning("Failed to fetch orderbook for token {}: {}", normalized_token, exc)
+            return None
+
+        snapshot = self._parse_orderbook_snapshot(raw)
+        if snapshot is None:
+            logger.warning("Failed to parse orderbook for token {}", normalized_token)
+        return snapshot
 
     async def fetch_market_info(self, market_id: str) -> MarketInfoData:
         """Fetch human-readable market question and category.
@@ -559,6 +608,10 @@ class PolymarketClient:
 
         if not request.token_id:
             return OrderResult(success=False, order_id=None, tx_hash=None, error="Missing token_id for live order")
+
+        price_decimal = self._validate_price(request.price_cents / 100.0)
+        if price_decimal is None:
+            return OrderResult(success=False, order_id=None, tx_hash=None, error="invalid_price")
 
         if request.token_id in self._missing_orderbooks:
             return OrderResult(
@@ -875,7 +928,9 @@ class PolymarketClient:
         clob_client = self._ensure_clob_client()
 
         side = BUY if request.side.lower() == "buy" else SELL
-        price_decimal = round(max(min(request.price_cents / 100, 0.999), 0.001), 2)
+        price_decimal = self._validate_price(request.price_cents / 100.0)
+        if price_decimal is None:
+            raise ValueError("invalid_price")
 
         # IMPROVED: flexible fill mode — support IOC (FAK) and FOK order types
         _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
@@ -1177,6 +1232,60 @@ class PolymarketClient:
                 return float(first["price"])
 
         return None
+
+    @staticmethod
+    def _validate_price(price: float | None) -> float | None:
+        if price is None:
+            return None
+        if price < settings.min_valid_price or price > settings.max_valid_price:
+            return None
+        return round(price, 2)
+
+    @classmethod
+    def _parse_orderbook_snapshot(cls, payload: Any) -> OrderbookSnapshot | None:
+        if not isinstance(payload, dict):
+            return None
+
+        bids = cls._parse_orderbook_levels(payload.get("bids") or payload.get("buy") or [])
+        asks = cls._parse_orderbook_levels(payload.get("asks") or payload.get("sell") or [])
+        best_bid = bids[0].price if bids else None
+        best_ask = asks[0].price if asks else None
+        return OrderbookSnapshot(bids=bids, asks=asks, best_bid=best_bid, best_ask=best_ask)
+
+    @classmethod
+    def _parse_orderbook_levels(cls, payload: Any) -> list[OrderbookLevel]:
+        if not isinstance(payload, list):
+            return []
+
+        levels: list[OrderbookLevel] = []
+        for item in payload:
+            if isinstance(item, dict):
+                price_raw = item.get("price") or item.get("p")
+                size_raw = item.get("size") or item.get("quantity") or item.get("amount") or item.get("shares")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                price_raw = item[0]
+                size_raw = item[1]
+            else:
+                continue
+
+            try:
+                price = float(price_raw)
+                size = float(size_raw)
+            except (TypeError, ValueError):
+                continue
+
+            if price <= 0 or size <= 0:
+                continue
+
+            if price > 1.0:
+                price /= 100.0
+
+            price = cls._validate_price(price)
+            if price is None:
+                continue
+            levels.append(OrderbookLevel(price=price, size=size))
+
+        return levels
 
     @staticmethod
     def _extract_token_price(payload: Any) -> float | None:
