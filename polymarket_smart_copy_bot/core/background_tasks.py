@@ -42,6 +42,13 @@ async def scheduled_trade_monitor() -> None:
     await _ORCHESTRATOR_INSTANCE._run_trade_monitor_job()
 
 
+async def scheduled_trade_reconcile() -> None:
+    if _ORCHESTRATOR_INSTANCE is None:
+        logger.warning("Trade reconcile job skipped: orchestrator is not initialized")
+        return
+    await _ORCHESTRATOR_INSTANCE._run_trade_reconcile_job()
+
+
 async def scheduled_portfolio_refresh() -> None:
     if _ORCHESTRATOR_INSTANCE is None:
         logger.warning("Portfolio refresh job skipped: orchestrator is not initialized")
@@ -124,9 +131,11 @@ class BackgroundOrchestrator:
         self.started_at = datetime.now(tz=timezone.utc)
         self.last_wallet_refresh_at: datetime | None = None
         self.last_trade_scan_at: datetime | None = None
+        self.last_trade_reconcile_at: datetime | None = None
         self.last_portfolio_refresh_at: datetime | None = None
         self.last_capital_recalc_at: datetime | None = None
         self.last_stale_order_cleanup_at: datetime | None = None
+        self._last_account_sync_at: datetime | None = None
         self._last_stale_order_cleanup: dict[str, Any] = {
             "ok": True,
             "dry_run": self._dry_run,
@@ -274,6 +283,16 @@ class BackgroundOrchestrator:
             misfire_grace_time=60,
         )
         self.scheduler.add_job(
+            scheduled_trade_reconcile,
+            trigger="interval",
+            seconds=settings.trade_reconcile_interval_seconds,
+            id="trade_reconcile",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=60,
+        )
+        self.scheduler.add_job(
             scheduled_portfolio_refresh,
             trigger="interval",
             seconds=settings.portfolio_refresh_seconds,
@@ -321,6 +340,9 @@ class BackgroundOrchestrator:
     async def _run_trade_monitor_job(self) -> None:
         await self._in_session("trade_monitor", self._trade_monitor_scan)
 
+    async def _run_trade_reconcile_job(self) -> None:
+        await self._in_session("trade_reconcile", self._trade_reconcile_scan)
+
     async def _run_portfolio_refresh_job(self) -> None:
         await self._in_session("portfolio_refresh", self._portfolio_refresh)
 
@@ -349,6 +371,7 @@ class BackgroundOrchestrator:
                 await self.purge_stale_positions()
             await self._run_capital_recalc_job()
             await self._run_trade_monitor_job()
+            await self._run_trade_reconcile_job()
             await self._run_stale_order_cleanup_job(expired_by_ttl=True)
         except asyncio.CancelledError:
             raise
@@ -392,9 +415,7 @@ class BackgroundOrchestrator:
             )
 
     async def _trade_monitor_scan(self, session: AsyncSession) -> None:
-        await self.trade_executor.reconcile_open_trade_states(session)
-        if not self._dry_run:
-            await self.portfolio_tracker.sync_account_open_positions(session)
+        await self._maybe_sync_account_positions(session, force=False)
 
         if not self._trading_enabled:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
@@ -412,11 +433,38 @@ class BackgroundOrchestrator:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
             return
 
-        intents = await self.trade_monitor.scan_for_trade_intents(session)
+        intents = await self.trade_monitor.scan_for_fresh_trade_intents(session)
         if not intents:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
             return
 
+        await self._execute_trade_intents(session, portfolio=portfolio, intents=intents)
+
+        self.last_trade_scan_at = datetime.now(tz=timezone.utc)
+
+    async def _trade_reconcile_scan(self, session: AsyncSession) -> None:
+        await self._maybe_sync_account_positions(session, force=True)
+
+        if not self._trading_enabled:
+            self.last_trade_reconcile_at = datetime.now(tz=timezone.utc)
+            return
+
+        portfolio = await self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode)
+        intents = await self.trade_monitor.scan_for_reconcile_intents(session)
+        if not intents:
+            self.last_trade_reconcile_at = datetime.now(tz=timezone.utc)
+            return
+
+        await self._execute_trade_intents(session, portfolio=portfolio, intents=intents)
+        self.last_trade_reconcile_at = datetime.now(tz=timezone.utc)
+
+    async def _execute_trade_intents(
+        self,
+        session: AsyncSession,
+        *,
+        portfolio: PortfolioState,
+        intents: list[Any],
+    ) -> PortfolioState:
         throttler = WalletThrottler()
         for intent in intents:
             if throttler.is_throttled(intent.wallet_address):
@@ -428,7 +476,7 @@ class BackgroundOrchestrator:
                 intent,
                 portfolio,
                 risk_mode=self._risk_mode,
-                fill_mode=settings.fill_mode,  # SAFETY: safe aggressive fill
+                fill_mode=settings.fill_mode,
                 price_filter_enabled=self._price_filter_enabled,
                 high_conviction_boost_enabled=self._high_conviction_boost_enabled,
             )
@@ -437,8 +485,21 @@ class BackgroundOrchestrator:
             elif status is not None:
                 throttler.record_failure(intent.wallet_address)
             portfolio = await self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode)
+        return portfolio
 
-        self.last_trade_scan_at = datetime.now(tz=timezone.utc)
+    async def _maybe_sync_account_positions(self, session: AsyncSession, *, force: bool) -> None:
+        if self._dry_run:
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        ttl_seconds = max(0, settings.account_sync_ttl_seconds)
+        if not force and self._last_account_sync_at is not None:
+            elapsed = (now - self._last_account_sync_at).total_seconds()
+            if elapsed < ttl_seconds:
+                return
+
+        await self.portfolio_tracker.sync_account_open_positions(session)
+        self._last_account_sync_at = now
 
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
         await self.trade_executor.reconcile_open_trade_states(session)
@@ -448,6 +509,7 @@ class BackgroundOrchestrator:
                 await self.portfolio_tracker.update_capital_base(session, api_balance)
 
         await self.portfolio_tracker.sync_account_open_positions(session)
+        self._last_account_sync_at = datetime.now(tz=timezone.utc)
         await self.portfolio_tracker.mark_to_market(session)
 
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
@@ -928,6 +990,7 @@ class BackgroundOrchestrator:
             "live_started_at": self._iso(self._live_started_at),
             "last_wallet_refresh_at": self._iso(self.last_wallet_refresh_at),
             "last_trade_scan_at": self._iso(self.last_trade_scan_at),
+            "last_trade_reconcile_at": self._iso(self.last_trade_reconcile_at),
             "last_portfolio_refresh_at": self._iso(self.last_portfolio_refresh_at),
             "last_capital_recalc_at": self._iso(self.last_capital_recalc_at),
             "last_stale_order_cleanup_at": self._iso(self.last_stale_order_cleanup_at),

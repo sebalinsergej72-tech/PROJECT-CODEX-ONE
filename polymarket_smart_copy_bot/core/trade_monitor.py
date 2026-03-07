@@ -79,26 +79,28 @@ class TradeMonitor:
         self._short_term_provider = short_term_provider
 
     async def scan_for_trade_intents(self, session: AsyncSession) -> list[TradeIntent]:
+        fresh = await self.scan_for_fresh_trade_intents(session)
+        reconcile = await self.scan_for_reconcile_intents(session)
+        intents = [*fresh, *reconcile]
+        intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
+        return intents[:60]
+
+    async def scan_for_fresh_trade_intents(self, session: AsyncSession) -> list[TradeIntent]:
         risk_mode = self._risk_mode_provider()
-        limit = settings.max_wallets_aggressive if risk_mode == "aggressive" else settings.max_qualified_wallets
-        query = (
-            select(QualifiedWallet)
-            .where(QualifiedWallet.enabled.is_(True))
-            .order_by(QualifiedWallet.score.desc())
-            .limit(limit)
-        )
-        qualified_wallets = list((await session.execute(query)).scalars().all())
+        qualified_wallets = await self._load_enabled_wallets(session, risk_mode=risk_mode)
         if not qualified_wallets:
             logger.debug("No qualified wallets to monitor")
-            qualified_wallets = []
+            return []
 
         existing_ids = await self._fetch_existing_trade_ids(session)
         intents: list[TradeIntent] = []
-        now = datetime.now(tz=timezone.utc)
-        reconcile_cutoff = now - timedelta(minutes=2)
-        qualified_by_address = {wallet.address.lower(): wallet for wallet in qualified_wallets}
-
-        trade_tasks = [self.polymarket_client.fetch_wallet_trades(wallet.address, limit=20) for wallet in qualified_wallets]
+        trade_tasks = [
+            self.polymarket_client.fetch_wallet_trades(
+                wallet.address,
+                limit=max(1, settings.trade_monitor_signal_fetch_limit),
+            )
+            for wallet in qualified_wallets
+        ]
         fetched_trade_batches = await asyncio.gather(*trade_tasks, return_exceptions=True)
 
         for wallet, trade_batch in zip(
@@ -119,8 +121,22 @@ class TradeMonitor:
             )
             intents.extend(wallet_intents)
 
+        intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
+        return intents[:60]
+
+    async def scan_for_reconcile_intents(self, session: AsyncSession) -> list[TradeIntent]:
+        risk_mode = self._risk_mode_provider()
+        qualified_wallets = await self._load_enabled_wallets(session, risk_mode=risk_mode)
+        qualified_by_address = {wallet.address.lower(): wallet for wallet in qualified_wallets}
         local_open_by_wallet = await self._fetch_local_open_positions(session)
+        if not local_open_by_wallet and not qualified_by_address:
+            return []
+
+        existing_ids = await self._fetch_existing_trade_ids(session)
+        now = datetime.now(tz=timezone.utc)
+        reconcile_cutoff = now - timedelta(minutes=2)
         wallets_for_reconcile = sorted(set(local_open_by_wallet.keys()) | set(qualified_by_address.keys()))
+        intents: list[TradeIntent] = []
         position_tasks = [
             self.polymarket_client.fetch_wallet_open_positions(wallet_address, limit=200)
             for wallet_address in wallets_for_reconcile
@@ -158,6 +174,21 @@ class TradeMonitor:
 
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
         return intents[:60]
+
+    @staticmethod
+    async def _load_enabled_wallets(
+        session: AsyncSession,
+        *,
+        risk_mode: str,
+    ) -> list[QualifiedWallet]:
+        limit = settings.max_wallets_aggressive if risk_mode == "aggressive" else settings.max_qualified_wallets
+        query = (
+            select(QualifiedWallet)
+            .where(QualifiedWallet.enabled.is_(True))
+            .order_by(QualifiedWallet.score.desc())
+            .limit(limit)
+        )
+        return list((await session.execute(query)).scalars().all())
 
     @staticmethod
     async def _fetch_existing_trade_ids(session: AsyncSession) -> set[str]:
@@ -261,7 +292,10 @@ class TradeMonitor:
         for local in local_open_positions:
             # Use opened_at here: updated_at is touched by mark-to-market refresh and would
             # otherwise suppress reconciliation closes indefinitely.
-            if local.opened_at > reconcile_cutoff:
+            opened_at = local.opened_at
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=timezone.utc)
+            if opened_at > reconcile_cutoff:
                 continue
 
             local_key = cls._position_key(local.market_id, local.token_id, local.outcome)
