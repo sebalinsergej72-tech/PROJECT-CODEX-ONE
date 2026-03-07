@@ -415,8 +415,6 @@ class BackgroundOrchestrator:
             )
 
     async def _trade_monitor_scan(self, session: AsyncSession) -> None:
-        await self._maybe_sync_account_positions(session, force=False)
-
         if not self._trading_enabled:
             self.last_trade_scan_at = datetime.now(tz=timezone.utc)
             return

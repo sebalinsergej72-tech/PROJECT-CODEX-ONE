@@ -141,28 +141,70 @@ def test_reconcile_scan_fetches_positions_without_trade_fetch() -> None:
     asyncio.run(_run_with_session(_case))
 
 
-def test_account_sync_ttl_skips_redundant_fast_sync() -> None:
-    class _DummyPortfolioTracker:
-        def __init__(self) -> None:
-            self.calls = 0
+def test_trade_monitor_scan_does_not_sync_account_positions() -> None:
+    class _DummyRiskManager:
+        def should_trigger_drawdown_stop(self, portfolio, risk_mode) -> bool:
+            return False
 
-        async def sync_account_open_positions(self, session) -> None:
-            self.calls += 1
+    class _DummyPortfolioTracker:
+        async def calculate_state(self, session, risk_mode):
+            return object()
+
+    class _DummyTradeMonitor:
+        async def scan_for_fresh_trade_intents(self, session):
+            return []
+
+    async def _unexpected_sync(session, *, force):
+        raise AssertionError("fast trade monitor must not sync account positions")
 
     async def _case() -> None:
         orchestrator = BackgroundOrchestrator.__new__(BackgroundOrchestrator)
-        orchestrator._dry_run = False
-        orchestrator._last_account_sync_at = utc_now()
+        orchestrator._trading_enabled = True
+        orchestrator._risk_mode = "aggressive"
+        orchestrator.last_trade_scan_at = None
+        orchestrator._last_portfolio_state = None
+        orchestrator.risk_manager = _DummyRiskManager()
         orchestrator.portfolio_tracker = _DummyPortfolioTracker()
+        orchestrator.trade_monitor = _DummyTradeMonitor()
+        orchestrator._maybe_sync_account_positions = _unexpected_sync
 
-        await BackgroundOrchestrator._maybe_sync_account_positions(orchestrator, None, force=False)
-        assert orchestrator.portfolio_tracker.calls == 0
+        await BackgroundOrchestrator._trade_monitor_scan(orchestrator, None)
 
-        orchestrator._last_account_sync_at = utc_now() - timedelta(seconds=settings.account_sync_ttl_seconds + 5)
-        await BackgroundOrchestrator._maybe_sync_account_positions(orchestrator, None, force=False)
-        assert orchestrator.portfolio_tracker.calls == 1
+        assert orchestrator.last_trade_scan_at is not None
 
-        await BackgroundOrchestrator._maybe_sync_account_positions(orchestrator, None, force=True)
-        assert orchestrator.portfolio_tracker.calls == 2
+    asyncio.run(_case())
+
+
+def test_trade_reconcile_scan_still_forces_account_sync() -> None:
+    class _DummyRiskManager:
+        pass
+
+    class _DummyPortfolioTracker:
+        async def calculate_state(self, session, risk_mode):
+            return object()
+
+    class _DummyTradeMonitor:
+        async def scan_for_reconcile_intents(self, session):
+            return []
+
+    async def _case() -> None:
+        calls: list[bool] = []
+
+        async def _sync(session, *, force):
+            calls.append(force)
+
+        orchestrator = BackgroundOrchestrator.__new__(BackgroundOrchestrator)
+        orchestrator._trading_enabled = True
+        orchestrator._risk_mode = "aggressive"
+        orchestrator.last_trade_reconcile_at = None
+        orchestrator.risk_manager = _DummyRiskManager()
+        orchestrator.portfolio_tracker = _DummyPortfolioTracker()
+        orchestrator.trade_monitor = _DummyTradeMonitor()
+        orchestrator._maybe_sync_account_positions = _sync
+
+        await BackgroundOrchestrator._trade_reconcile_scan(orchestrator, None)
+
+        assert calls == [True]
+        assert orchestrator.last_trade_reconcile_at is not None
 
     asyncio.run(_case())
