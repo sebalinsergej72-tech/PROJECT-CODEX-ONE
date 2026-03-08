@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     discovery_max_days_since_last_trade_conservative: int = Field(
         default=5, alias="DISCOVERY_MAX_DAYS_SINCE_LAST_TRADE_CONSERVATIVE"
     )
+    reserve_wallet_pool_target: int = Field(default=5, alias="RESERVE_WALLET_POOL_TARGET")
+    reserve_min_trades_aggressive: int = Field(default=90, alias="RESERVE_MIN_TRADES_AGGRESSIVE")
+    reserve_min_winrate_aggressive: float = Field(default=0.62, alias="RESERVE_MIN_WINRATE_AGGRESSIVE")
+    reserve_min_profit_factor_aggressive: float = Field(
+        default=1.45,
+        alias="RESERVE_MIN_PROFIT_FACTOR_AGGRESSIVE",
+    )
+    reserve_min_avg_size_aggressive: float = Field(default=250.0, alias="RESERVE_MIN_AVG_SIZE_AGGRESSIVE")
+    reserve_min_trades_cons: int = Field(default=120, alias="RESERVE_MIN_TRADES_CONS")
+    reserve_min_winrate_cons: float = Field(default=0.66, alias="RESERVE_MIN_WINRATE_CONS")
+    reserve_min_profit_factor_cons: float = Field(default=1.6, alias="RESERVE_MIN_PROFIT_FACTOR_CONS")
+    reserve_min_avg_size_cons: float = Field(default=400.0, alias="RESERVE_MIN_AVG_SIZE_CONS")
     avg_size_score_cap: float = Field(default=50.0, alias="AVG_SIZE_CAP")
     min_attempts_for_tradability_penalty: int = Field(
         default=5,

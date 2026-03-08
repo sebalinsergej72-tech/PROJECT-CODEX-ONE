@@ -1016,7 +1016,10 @@ class BackgroundOrchestrator:
                     "passed_consecutive_losses": self.wallet_discovery.last_result.counters.passed_consecutive_losses,
                     "passed_wallet_age": self.wallet_discovery.last_result.counters.passed_wallet_age,
                     "passed_all_filters": self.wallet_discovery.last_result.counters.passed_all_filters,
+                    "reserve_eligible": self.wallet_discovery.last_result.counters.reserve_eligible,
                     "stored_top": self.wallet_discovery.last_result.stored_top,
+                    "reserve_wallets": self.wallet_discovery.last_result.reserve_wallets,
+                    "reserve_promoted": self.wallet_discovery.last_result.reserve_promoted,
                     "enabled_wallets": self.wallet_discovery.last_result.enabled_wallets,
                     "report": self.wallet_discovery.last_result.report,
                 }
@@ -1033,7 +1036,10 @@ class BackgroundOrchestrator:
                     "passed_consecutive_losses": 0,
                     "passed_wallet_age": 0,
                     "passed_all_filters": 0,
+                    "reserve_eligible": 0,
                     "stored_top": 0,
+                    "reserve_wallets": 0,
+                    "reserve_promoted": 0,
                     "enabled_wallets": self._tracked_wallets_count,
                     "report": "",
                 }
