@@ -53,8 +53,8 @@ class Settings(BaseSettings):
     # SAFETY: IOC + controlled slippage — fill mode settings
     fill_mode: FillMode = Field(default="conservative", alias="FILL_MODE")
     aggressive_fill_type: str = Field(default="IOC", alias="AGGRESSIVE_FILL_TYPE")            # IOC or FOK
-    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")                   # +0.05% default
-    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")   # hard cap 0.15%
+    max_slippage_bps: float = Field(default=35.0, alias="MAX_SLIPPAGE_BPS")                  # +0.35% default
+    max_allowed_slippage_bps: float = Field(default=35.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")  # hard cap 0.35%
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")  # 2 minutes
     aggressive_reprice_delay_seconds: int = Field(
         default=25,
@@ -95,8 +95,8 @@ class Settings(BaseSettings):
     max_kelly_bet_pct: float = Field(default=0.15, alias="MAX_KELLY_BET_PCT")
     min_trade_size_usd: float = Field(default=3.0, alias="MIN_TRADE_SIZE_USD")
     # SAFETY: safe aggressive fill
-    max_slippage_bps: float = Field(default=5.0, alias="MAX_SLIPPAGE_BPS")
-    max_allowed_slippage_bps: float = Field(default=15.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
+    max_slippage_bps: float = Field(default=35.0, alias="MAX_SLIPPAGE_BPS")
+    max_allowed_slippage_bps: float = Field(default=35.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")
 
     wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")
