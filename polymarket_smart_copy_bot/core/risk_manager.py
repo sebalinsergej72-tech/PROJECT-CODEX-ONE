@@ -166,16 +166,17 @@ class RiskManager:
         kelly_leg = capital * kelly_fraction
         raw_target_size = proportional_leg + kelly_leg
 
-        min_position_size = settings.min_trade_size_usd
-        target_size = min(
+        caps = [
             raw_target_size,
             per_position_cap,
             remaining_wallet_capacity,
             remaining_total_capacity,
-            portfolio.available_cash_usd,
-        )
+        ]
+        if not settings.ignore_available_cash_for_sizing:
+            caps.append(portfolio.available_cash_usd)
+        target_size = min(caps)
 
-        if target_size < min_position_size:
+        if settings.enforce_min_trade_size and target_size < settings.min_trade_size_usd:
             return RiskDecision(False, "size_below_minimum", 0.0, False)
 
         requires_manual = target_size >= settings.manual_confirmation_usd
@@ -212,10 +213,11 @@ class RiskManager:
             per_position_cap,
             remaining_wallet,
             remaining_exposure,
-            portfolio.available_cash_usd,
         )
+        if not settings.ignore_available_cash_for_sizing:
+            target_size = min(target_size, portfolio.available_cash_usd)
 
-        if target_size < settings.min_trade_size_usd:
+        if settings.enforce_min_trade_size and target_size < settings.min_trade_size_usd:
             return RiskDecision(False, "size_below_minimum", 0.0, False)
 
         return RiskDecision(
