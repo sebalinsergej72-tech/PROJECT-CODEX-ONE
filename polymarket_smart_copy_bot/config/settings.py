@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     kelly_fraction_scale: float = Field(default=0.20, alias="KELLY_FRACTION")
     max_kelly_bet_pct: float = Field(default=0.15, alias="MAX_KELLY_BET_PCT")
     min_trade_size_usd: float = Field(default=3.0, alias="MIN_TRADE_SIZE_USD")
+    ignore_available_cash_for_sizing: bool = Field(
+        default=True,
+        alias="IGNORE_AVAILABLE_CASH_FOR_SIZING",
+    )
+    enforce_min_trade_size: bool = Field(
+        default=False,
+        alias="ENFORCE_MIN_TRADE_SIZE",
+    )
     # SAFETY: safe aggressive fill
     max_slippage_bps: float = Field(default=35.0, alias="MAX_SLIPPAGE_BPS")
     max_allowed_slippage_bps: float = Field(default=35.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
