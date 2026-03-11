@@ -350,6 +350,122 @@ def test_execute_copy_trade_skips_on_low_liquidity() -> None:
     asyncio.run(_run_with_session(_case))
 
 
+def test_execute_copy_trade_allows_small_absolute_move_on_low_price_market() -> None:
+    class _DummyPolymarketClient:
+        async def fetch_orderbook(self, token_id):
+            return OrderbookSnapshot(
+                bids=[OrderbookLevel(price=0.108, size=200.0)],
+                asks=[OrderbookLevel(price=0.108, size=200.0)],
+                best_bid=0.108,
+                best_ask=0.108,
+            )
+
+        async def place_order(self, request):
+            return type("OrderResult", (), {"success": True, "order_id": "ord-low", "tx_hash": "tx-low", "error": None})()
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        def evaluate_trade(self, **kwargs):
+            return RiskDecision(True, "ok", 7.0, False, 1.0, 0.0)
+
+        def can_accept_slippage(self, **kwargs):
+            return True, 35.0
+
+        @staticmethod
+        def compute_slippage_bps(**kwargs):
+            return 0.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+
+        portfolio = PortfolioState(100.0, 100.0, 0.0, 0.0, 0.0, 0)
+        await executor.execute_copy_trade(
+            session,
+            _intent(side="buy", price_cents=10.0, size_usd=7.0),
+            portfolio,
+            risk_mode="aggressive",
+            fill_mode="conservative",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+
+        row = (await session.execute(select(CopiedTrade))).scalar_one()
+        assert row.status == TradeStatus.SUBMITTED.value
+        assert row.order_id == "ord-low"
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_execute_copy_trade_still_skips_large_price_move() -> None:
+    class _DummyPolymarketClient:
+        async def fetch_orderbook(self, token_id):
+            return OrderbookSnapshot(
+                bids=[OrderbookLevel(price=0.170, size=200.0)],
+                asks=[OrderbookLevel(price=0.170, size=200.0)],
+                best_bid=0.170,
+                best_ask=0.170,
+            )
+
+        async def place_order(self, request):
+            raise AssertionError("place_order should not be called when price moved too far")
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        def evaluate_trade(self, **kwargs):
+            return RiskDecision(True, "ok", 7.0, False, 1.0, 0.0)
+
+        def can_accept_slippage(self, **kwargs):
+            return True, 35.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+
+        portfolio = PortfolioState(100.0, 100.0, 0.0, 0.0, 0.0, 0)
+        await executor.execute_copy_trade(
+            session,
+            _intent(side="buy", price_cents=10.0, size_usd=7.0),
+            portfolio,
+            risk_mode="aggressive",
+            fill_mode="conservative",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+
+        row = (await session.execute(select(CopiedTrade))).scalar_one()
+        assert row.status == TradeStatus.SKIPPED.value
+        assert row.reason == "price_moved:70.0%"
+
+    asyncio.run(_run_with_session(_case))
+
+
 def test_validate_sell_size_trims_to_available_position() -> None:
     position = Position(
         wallet_address="0xabc",
