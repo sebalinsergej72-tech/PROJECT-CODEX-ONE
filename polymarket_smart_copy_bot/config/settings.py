@@ -102,6 +102,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ENFORCE_MIN_TRADE_SIZE",
     )
+    enable_drawdown_guards: bool = Field(
+        default=False,
+        alias="ENABLE_DRAWDOWN_GUARDS",
+    )
     # SAFETY: safe aggressive fill
     max_slippage_bps: float = Field(default=35.0, alias="MAX_SLIPPAGE_BPS")
     max_allowed_slippage_bps: float = Field(default=35.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")

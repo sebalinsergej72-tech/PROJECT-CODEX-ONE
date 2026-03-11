@@ -48,12 +48,12 @@ class RiskManager:
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
     ) -> RiskDecision:
-        # IMPROVED: First check global max drawdown limits
-        if self._global_drawdown_triggered(portfolio, risk_mode):
-            return RiskDecision(False, "global_drawdown_limit_reached", 0.0, False)
+        if settings.enable_drawdown_guards:
+            if self._global_drawdown_triggered(portfolio, risk_mode):
+                return RiskDecision(False, "global_drawdown_limit_reached", 0.0, False)
 
-        if self._drawdown_stop_triggered(portfolio, risk_mode):
-            return RiskDecision(False, "drawdown_stop_triggered", 0.0, False)
+            if self._drawdown_stop_triggered(portfolio, risk_mode):
+                return RiskDecision(False, "drawdown_stop_triggered", 0.0, False)
 
         if price_filter_enabled and not self._price_filter(source_price_cents):
             return RiskDecision(
@@ -82,6 +82,8 @@ class RiskManager:
         )
 
     def should_trigger_drawdown_stop(self, portfolio: PortfolioState, risk_mode: RiskMode) -> bool:
+        if not settings.enable_drawdown_guards:
+            return False
         return self._global_drawdown_triggered(portfolio, risk_mode) or self._drawdown_stop_triggered(portfolio, risk_mode)
 
     # SAFETY: safe aggressive fill

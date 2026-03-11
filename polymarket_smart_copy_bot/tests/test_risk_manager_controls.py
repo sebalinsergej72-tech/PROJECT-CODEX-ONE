@@ -118,6 +118,72 @@ def test_aggressive_risk_respects_available_cash_when_flag_enabled() -> None:
     assert decision.target_size_usd == portfolio.available_cash_usd
 
 
+def test_drawdown_guards_are_disabled_by_default() -> None:
+    portfolio = PortfolioState(
+        total_equity_usd=18.0,
+        available_cash_usd=9.0,
+        exposure_usd=9.0,
+        daily_pnl_usd=-18.0,
+        cumulative_pnl_usd=-50.0,
+        open_positions=10,
+        daily_drawdown_pct=0.30,
+    )
+    manager = RiskManager()
+
+    decision = manager.evaluate_trade(
+        source_price_cents=60.0,
+        source_size_usd=10.0,
+        wallet_score=1.0,
+        wallet_win_rate=0.7,
+        wallet_profit_factor=1.8,
+        wallet_avg_trade_size_usd=100.0,
+        wallet_current_exposure_usd=0.0,
+        portfolio=portfolio,
+        risk_mode="aggressive",
+        price_filter_enabled=False,
+        high_conviction_boost_enabled=False,
+    )
+
+    assert manager.should_trigger_drawdown_stop(portfolio, "aggressive") is False
+    assert decision.allowed is True
+
+
+def test_drawdown_guards_block_when_enabled() -> None:
+    original = settings.enable_drawdown_guards
+    settings.enable_drawdown_guards = True
+    try:
+        portfolio = PortfolioState(
+            total_equity_usd=18.0,
+            available_cash_usd=9.0,
+            exposure_usd=9.0,
+            daily_pnl_usd=-18.0,
+            cumulative_pnl_usd=-50.0,
+            open_positions=10,
+            daily_drawdown_pct=0.30,
+        )
+        manager = RiskManager()
+        decision = manager.evaluate_trade(
+            source_price_cents=60.0,
+            source_size_usd=10.0,
+            wallet_score=1.0,
+            wallet_win_rate=0.7,
+            wallet_profit_factor=1.8,
+            wallet_avg_trade_size_usd=100.0,
+            wallet_current_exposure_usd=0.0,
+            portfolio=portfolio,
+            risk_mode="aggressive",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+        triggered = manager.should_trigger_drawdown_stop(portfolio, "aggressive")
+    finally:
+        settings.enable_drawdown_guards = original
+
+    assert triggered is True
+    assert decision.allowed is False
+    assert decision.reason == "global_drawdown_limit_reached"
+
+
 def test_aggressive_wallet_multiplier_is_capped_more_conservatively() -> None:
     decision = RiskManager().evaluate_trade(
         source_price_cents=60.0,
