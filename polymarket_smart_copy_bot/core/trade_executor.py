@@ -789,6 +789,8 @@ class TradeExecutor:
 
     @staticmethod
     def _minimum_position_size(*, portfolio_state: PortfolioState, risk_mode: RiskMode) -> float:
+        if not settings.enforce_min_trade_size:
+            return 0.0
         return max(settings.min_trade_size_usd, 0.0)
 
     @staticmethod
