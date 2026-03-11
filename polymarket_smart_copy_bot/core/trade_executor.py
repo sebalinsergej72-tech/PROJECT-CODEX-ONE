@@ -580,7 +580,11 @@ class TradeExecutor:
 
         source_price = max(intent.source_price_cents / 100.0, settings.min_valid_price)
         deviation = abs(current_price - source_price) / source_price
-        if deviation > settings.max_price_deviation_pct:
+        absolute_deviation_cents = abs((current_price * 100.0) - float(intent.source_price_cents))
+        if (
+            deviation > settings.max_price_deviation_pct
+            and absolute_deviation_cents > settings.min_absolute_price_deviation_cents
+        ):
             return False, f"price_moved:{deviation:.1%}"
 
         return True, None
