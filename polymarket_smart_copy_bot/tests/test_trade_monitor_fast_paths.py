@@ -9,7 +9,7 @@ from config.settings import settings
 from core.background_tasks import BackgroundOrchestrator
 from core.trade_monitor import TradeMonitor
 from data.polymarket_client import WalletOpenPosition, WalletTradeSignal
-from models.models import Base, Position, TradeSide
+from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import utc_now
 
@@ -87,6 +87,101 @@ def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
         assert client.trade_calls == 1
         assert client.trade_limits == [settings.trade_monitor_signal_fetch_limit]
         assert client.position_calls == 0
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_signal_on_recent_price_moved_cooldown() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="fast",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="old-price-moved",
+                wallet_address=wallet_address,
+                market_id="market-1",
+                token_id="token-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=55.0,
+                size_usd=12.0,
+                status=TradeStatus.SKIPPED.value,
+                reason="price_moved:12.0%",
+                copied_at=utc_now(),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_allows_signal_after_price_moved_cooldown_expires() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="fast",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="expired-price-moved",
+                wallet_address=wallet_address,
+                market_id="market-1",
+                token_id="token-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=55.0,
+                size_usd=12.0,
+                status=TradeStatus.SKIPPED.value,
+                reason="price_moved:12.0%",
+                copied_at=utc_now() - timedelta(minutes=settings.price_moved_market_cooldown_minutes + 1),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert len(intents) == 1
+        assert intents[0].market_id == "market-1"
 
     asyncio.run(_run_with_session(_case))
 
