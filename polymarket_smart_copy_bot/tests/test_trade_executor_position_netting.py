@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from core.trade_executor import TradeExecutor
 from core.risk_manager import PortfolioState, RiskDecision
 from core.trade_monitor import TradeIntent
+from config.settings import settings
 from data.polymarket_client import OrderbookLevel, OrderbookSnapshot
 from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 
@@ -373,6 +374,20 @@ def test_validate_sell_size_trims_to_available_position() -> None:
 
     assert trimmed == pytest.approx(3.0, rel=1e-6)
     assert reason is None
+
+
+def test_minimum_position_size_is_disabled_when_min_trade_guard_is_off() -> None:
+    original = settings.enforce_min_trade_size
+    settings.enforce_min_trade_size = False
+    try:
+        minimum = TradeExecutor._minimum_position_size(
+            portfolio_state=PortfolioState(100.0, 50.0, 0.0, 0.0, 0.0, 0),
+            risk_mode="aggressive",
+        )
+    finally:
+        settings.enforce_min_trade_size = original
+
+    assert minimum == 0.0
 
 
 def test_execute_copy_trade_skips_sell_without_confirmed_position() -> None:
