@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import settings
 from data.polymarket_client import PolymarketClient, WalletOpenPosition, WalletTradeSignal
-from models.models import CopiedTrade, Position, TradeSide
+from models.models import CopiedTrade, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 
 
@@ -93,6 +93,7 @@ class TradeMonitor:
             return []
 
         existing_ids = await self._fetch_existing_trade_ids(session)
+        cooldown_markets, cooldown_tokens = await self._fetch_price_moved_market_cooldown(session)
         intents: list[TradeIntent] = []
         trade_tasks = [
             self.polymarket_client.fetch_wallet_trades(
@@ -116,6 +117,8 @@ class TradeMonitor:
                 wallet,
                 trade_batch,
                 existing_ids,
+                cooldown_markets=cooldown_markets,
+                cooldown_tokens=cooldown_tokens,
                 price_filter_enabled=self._price_filter_provider(),
                 short_term_enabled=self._short_term_provider(),
             )
@@ -197,6 +200,25 @@ class TradeMonitor:
         return set(rows)
 
     @staticmethod
+    async def _fetch_price_moved_market_cooldown(
+        session: AsyncSession,
+    ) -> tuple[set[str], set[str]]:
+        cooldown_minutes = max(0, settings.price_moved_market_cooldown_minutes)
+        if cooldown_minutes <= 0:
+            return set(), set()
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=cooldown_minutes)
+        query = select(CopiedTrade.market_id, CopiedTrade.token_id).where(
+            CopiedTrade.status == TradeStatus.SKIPPED.value,
+            CopiedTrade.reason.like("price_moved:%"),
+            CopiedTrade.copied_at >= cutoff,
+        )
+        rows = (await session.execute(query)).all()
+        cooldown_markets = {str(market_id).strip().lower() for market_id, _ in rows if market_id}
+        cooldown_tokens = {str(token_id).strip().lower() for _, token_id in rows if token_id}
+        return cooldown_markets, cooldown_tokens
+
+    @staticmethod
     async def _fetch_local_open_positions(
         session: AsyncSession,
     ) -> dict[str, list[Position]]:
@@ -220,6 +242,8 @@ class TradeMonitor:
         signals: list[WalletTradeSignal],
         existing_ids: set[str],
         *,
+        cooldown_markets: set[str],
+        cooldown_tokens: set[str],
         price_filter_enabled: bool,
         short_term_enabled: bool,
     ) -> list[TradeIntent]:
@@ -227,6 +251,13 @@ class TradeMonitor:
 
         for signal in signals:
             if signal.external_trade_id in existing_ids:
+                continue
+
+            if TradeMonitor._is_signal_on_price_moved_cooldown(
+                signal,
+                cooldown_markets=cooldown_markets,
+                cooldown_tokens=cooldown_tokens,
+            ):
                 continue
 
             is_short = TradeMonitor._is_short_term_signal(signal)
@@ -344,6 +375,19 @@ class TradeMonitor:
     def _is_short_term_signal(signal: WalletTradeSignal) -> bool:
         text = f"{signal.market_id} {signal.outcome} {signal.market_slug or ''}".lower()
         return any(token in text for token in ("5 min", "5m", "15 min", "15m", "hourly", "1h"))
+
+    @staticmethod
+    def _is_signal_on_price_moved_cooldown(
+        signal: WalletTradeSignal,
+        *,
+        cooldown_markets: set[str],
+        cooldown_tokens: set[str],
+    ) -> bool:
+        token_key = (signal.token_id or "").strip().lower()
+        market_key = (signal.market_id or "").strip().lower()
+        if token_key and token_key in cooldown_tokens:
+            return True
+        return bool(market_key and market_key in cooldown_markets)
 
     @classmethod
     def _is_market_tradeable(cls, *, signal: WalletTradeSignal, is_short_term: bool) -> bool:

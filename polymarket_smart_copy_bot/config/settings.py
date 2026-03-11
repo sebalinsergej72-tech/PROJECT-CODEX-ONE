@@ -73,6 +73,10 @@ class Settings(BaseSettings):
         default=1.0,
         alias="MIN_ABSOLUTE_PRICE_DEVIATION_CENTS",
     )
+    price_moved_market_cooldown_minutes: int = Field(
+        default=30,
+        alias="PRICE_MOVED_MARKET_COOLDOWN_MINUTES",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
