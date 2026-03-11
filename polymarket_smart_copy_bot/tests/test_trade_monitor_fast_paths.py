@@ -175,7 +175,7 @@ def test_trade_monitor_scan_does_not_sync_account_positions() -> None:
     asyncio.run(_case())
 
 
-def test_trade_reconcile_scan_still_forces_account_sync() -> None:
+def test_trade_reconcile_scan_uses_ttl_gated_account_sync() -> None:
     class _DummyRiskManager:
         pass
 
@@ -204,7 +204,60 @@ def test_trade_reconcile_scan_still_forces_account_sync() -> None:
 
         await BackgroundOrchestrator._trade_reconcile_scan(orchestrator, None)
 
-        assert calls == [True]
+        assert calls == [False]
         assert orchestrator.last_trade_reconcile_at is not None
+
+    asyncio.run(_case())
+
+
+def test_portfolio_refresh_uses_ttl_gated_account_sync() -> None:
+    class _DummyTradeExecutor:
+        async def reconcile_open_trade_states(self, session) -> None:
+            return None
+
+    class _DummyPolymarketClient:
+        async def fetch_account_balance_usd(self):
+            return 10.0
+
+    class _DummyPortfolioTracker:
+        async def update_capital_base(self, session, balance):
+            return None
+
+        async def mark_to_market(self, session):
+            return None
+
+        async def record_snapshot(self, session, risk_mode):
+            class _Snapshot:
+                total_equity_usd = 0.0
+
+            return _Snapshot()
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    async def _case() -> None:
+        calls: list[bool] = []
+
+        async def _sync(session, *, force):
+            calls.append(force)
+
+        orchestrator = BackgroundOrchestrator.__new__(BackgroundOrchestrator)
+        orchestrator._dry_run = False
+        orchestrator._risk_mode = "aggressive"
+        orchestrator._last_portfolio_state = None
+        orchestrator.last_portfolio_refresh_at = None
+        orchestrator._last_account_sync_at = None
+        orchestrator.trade_executor = _DummyTradeExecutor()
+        orchestrator.polymarket_client = _DummyPolymarketClient()
+        orchestrator.portfolio_tracker = _DummyPortfolioTracker()
+        orchestrator.notifications = _DummyNotifications()
+        orchestrator._maybe_sync_account_positions = _sync
+        orchestrator._refresh_exchange_balances = lambda: asyncio.sleep(0)  # type: ignore[method-assign]
+
+        await BackgroundOrchestrator._portfolio_refresh(orchestrator, None)
+
+        assert calls == [False]
+        assert orchestrator.last_portfolio_refresh_at is not None
 
     asyncio.run(_case())

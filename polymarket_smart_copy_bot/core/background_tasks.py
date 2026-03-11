@@ -441,7 +441,7 @@ class BackgroundOrchestrator:
         self.last_trade_scan_at = datetime.now(tz=timezone.utc)
 
     async def _trade_reconcile_scan(self, session: AsyncSession) -> None:
-        await self._maybe_sync_account_positions(session, force=True)
+        await self._maybe_sync_account_positions(session, force=False)
 
         if not self._trading_enabled:
             self.last_trade_reconcile_at = datetime.now(tz=timezone.utc)
@@ -506,8 +506,7 @@ class BackgroundOrchestrator:
             if api_balance is not None and api_balance >= 0:
                 await self.portfolio_tracker.update_capital_base(session, api_balance)
 
-        await self.portfolio_tracker.sync_account_open_positions(session)
-        self._last_account_sync_at = datetime.now(tz=timezone.utc)
+        await self._maybe_sync_account_positions(session, force=False)
         await self.portfolio_tracker.mark_to_market(session)
 
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)
