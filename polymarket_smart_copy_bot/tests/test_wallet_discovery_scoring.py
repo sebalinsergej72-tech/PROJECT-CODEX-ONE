@@ -261,3 +261,89 @@ def test_discovery_promotes_reserve_wallets_when_live_pool_is_short() -> None:
         }
 
     asyncio.run(_run_with_session(_case))
+
+
+def test_discovery_disables_stale_strict_wallet_and_uses_fresh_reserve_for_live_pool() -> None:
+    stale_strict = CandidateSeed(
+        address="0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        name="stale-strict",
+        niches={"politics"},
+        monthly_pnl_pct=0.12,
+        win_rate_hint=0.74,
+        trades_90d_hint=180,
+        trades_30d_hint=35,
+        profit_factor_hint=1.95,
+        avg_size_hint=900.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=5),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    fresh_strict = CandidateSeed(
+        address="0xffffffffffffffffffffffffffffffffffffffff",
+        name="fresh-strict",
+        niches={"business"},
+        monthly_pnl_pct=0.10,
+        win_rate_hint=0.72,
+        trades_90d_hint=160,
+        trades_30d_hint=28,
+        profit_factor_hint=1.85,
+        avg_size_hint=800.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    reserve_fresh = CandidateSeed(
+        address="0x9999999999999999999999999999999999999999",
+        name="reserve-fresh",
+        niches={"sports"},
+        monthly_pnl_pct=0.08,
+        win_rate_hint=0.63,
+        trades_90d_hint=100,
+        trades_30d_hint=18,
+        profit_factor_hint=1.48,
+        avg_size_hint=300.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=90,
+    )
+
+    async def _case(session: AsyncSession) -> None:
+        discovery = WalletDiscovery(_HintOnlyPolymarketClient(), _DummyNotifications())
+        original_limit = settings.max_wallets_aggressive
+        original_reserve_target = settings.reserve_wallet_pool_target
+        original_live_freshness = settings.live_pool_max_days_since_last_trade_aggressive
+        try:
+            settings.max_wallets_aggressive = 2
+            settings.reserve_wallet_pool_target = 2
+            settings.live_pool_max_days_since_last_trade_aggressive = 2
+
+            async def _fetch_candidate_seeds():
+                return {
+                    stale_strict.address: stale_strict,
+                    fresh_strict.address: fresh_strict,
+                    reserve_fresh.address: reserve_fresh,
+                }
+
+            discovery._fetch_candidate_seeds = _fetch_candidate_seeds
+
+            result = await discovery.discover_and_score(session, auto_add=True, risk_mode="aggressive")
+            rows = (
+                await session.execute(select(QualifiedWallet).order_by(QualifiedWallet.address.asc()))
+            ).scalars().all()
+        finally:
+            settings.max_wallets_aggressive = original_limit
+            settings.reserve_wallet_pool_target = original_reserve_target
+            settings.live_pool_max_days_since_last_trade_aggressive = original_live_freshness
+
+        enabled = {row.address for row in rows if row.enabled}
+        stale_row = next(row for row in rows if row.address == stale_strict.address)
+
+        assert result.counters.passed_all_filters == 2
+        assert result.counters.reserve_eligible == 1
+        assert result.enabled_wallets == 2
+        assert fresh_strict.address in enabled
+        assert reserve_fresh.address in enabled
+        assert stale_strict.address not in enabled
+        assert stale_row.last_trade_ts is not None
+
+    asyncio.run(_run_with_session(_case))

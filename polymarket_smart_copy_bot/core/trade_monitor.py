@@ -93,7 +93,8 @@ class TradeMonitor:
             return []
 
         existing_ids = await self._fetch_existing_trade_ids(session)
-        cooldown_markets, cooldown_tokens = await self._fetch_price_moved_market_cooldown(session)
+        cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
+        sellable_positions = await self._fetch_local_sellable_positions(session)
         intents: list[TradeIntent] = []
         trade_tasks = [
             self.polymarket_client.fetch_wallet_trades(
@@ -119,6 +120,7 @@ class TradeMonitor:
                 existing_ids,
                 cooldown_markets=cooldown_markets,
                 cooldown_tokens=cooldown_tokens,
+                sellable_positions=sellable_positions,
                 price_filter_enabled=self._price_filter_provider(),
                 short_term_enabled=self._short_term_provider(),
             )
@@ -200,22 +202,34 @@ class TradeMonitor:
         return set(rows)
 
     @staticmethod
-    async def _fetch_price_moved_market_cooldown(
+    async def _fetch_market_cooldowns(
         session: AsyncSession,
     ) -> tuple[set[str], set[str]]:
-        cooldown_minutes = max(0, settings.price_moved_market_cooldown_minutes)
-        if cooldown_minutes <= 0:
+        max_cooldown_minutes = max(
+            0,
+            settings.price_moved_market_cooldown_minutes,
+            settings.no_orderbook_market_cooldown_minutes,
+            settings.low_liquidity_market_cooldown_minutes,
+        )
+        if max_cooldown_minutes <= 0:
             return set(), set()
 
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=cooldown_minutes)
-        query = select(CopiedTrade.market_id, CopiedTrade.token_id).where(
+        now = datetime.now(tz=timezone.utc)
+        cutoff = now - timedelta(minutes=max_cooldown_minutes)
+        query = select(CopiedTrade).where(
             CopiedTrade.status == TradeStatus.SKIPPED.value,
-            CopiedTrade.reason.like("price_moved:%"),
             CopiedTrade.copied_at >= cutoff,
         )
-        rows = (await session.execute(query)).all()
-        cooldown_markets = {str(market_id).strip().lower() for market_id, _ in rows if market_id}
-        cooldown_tokens = {str(token_id).strip().lower() for _, token_id in rows if token_id}
+        rows = (await session.execute(query)).scalars().all()
+        cooldown_markets: set[str] = set()
+        cooldown_tokens: set[str] = set()
+        for trade in rows:
+            if not TradeMonitor._is_trade_on_market_cooldown(trade, now=now):
+                continue
+            if trade.market_id:
+                cooldown_markets.add(str(trade.market_id).strip().lower())
+            if trade.token_id:
+                cooldown_tokens.add(str(trade.token_id).strip().lower())
         return cooldown_markets, cooldown_tokens
 
     @staticmethod
@@ -232,6 +246,20 @@ class TradeMonitor:
             grouped.setdefault(row.wallet_address.lower(), []).append(row)
         return grouped
 
+    @staticmethod
+    async def _fetch_local_sellable_positions(
+        session: AsyncSession,
+    ) -> dict[str, Position]:
+        query = select(Position).where(Position.is_open.is_(True))
+        rows = (await session.execute(query)).scalars().all()
+        sellable: dict[str, Position] = {}
+        for row in rows:
+            key = TradeMonitor._position_key(row.market_id, row.token_id, row.outcome)
+            current = sellable.get(key)
+            if current is None or row.quantity > current.quantity:
+                sellable[key] = row
+        return sellable
+
     # Maximum trade intents per wallet per scan cycle to prevent
     # rapid-fire copying when a wallet spams many trades at once.
     MAX_INTENTS_PER_WALLET = 2
@@ -244,6 +272,7 @@ class TradeMonitor:
         *,
         cooldown_markets: set[str],
         cooldown_tokens: set[str],
+        sellable_positions: dict[str, Position],
         price_filter_enabled: bool,
         short_term_enabled: bool,
     ) -> list[TradeIntent]:
@@ -259,6 +288,13 @@ class TradeMonitor:
                 cooldown_tokens=cooldown_tokens,
             ):
                 continue
+
+            if signal.side.lower() == TradeSide.SELL.value:
+                sellable_position = TradeMonitor._matching_sellable_position(signal, sellable_positions)
+                if sellable_position is None:
+                    continue
+                if TradeMonitor._is_sell_signal_residual_too_small(signal, sellable_position):
+                    continue
 
             is_short = TradeMonitor._is_short_term_signal(signal)
             if is_short and not short_term_enabled:
@@ -388,6 +424,41 @@ class TradeMonitor:
         if token_key and token_key in cooldown_tokens:
             return True
         return bool(market_key and market_key in cooldown_markets)
+
+    @staticmethod
+    def _is_trade_on_market_cooldown(trade: CopiedTrade, *, now: datetime) -> bool:
+        reason = (trade.reason or "").strip().lower()
+        cooldown_minutes = 0
+        if reason.startswith("price_moved:"):
+            cooldown_minutes = settings.price_moved_market_cooldown_minutes
+        elif reason == "no_orderbook":
+            cooldown_minutes = settings.no_orderbook_market_cooldown_minutes
+        elif reason.startswith("low_liquidity:"):
+            cooldown_minutes = settings.low_liquidity_market_cooldown_minutes
+        if cooldown_minutes <= 0 or trade.copied_at is None:
+            return False
+        copied_at = trade.copied_at
+        if copied_at.tzinfo is None:
+            copied_at = copied_at.replace(tzinfo=timezone.utc)
+        return copied_at >= now - timedelta(minutes=cooldown_minutes)
+
+    @staticmethod
+    def _matching_sellable_position(
+        signal: WalletTradeSignal,
+        sellable_positions: dict[str, Position],
+    ) -> Position | None:
+        key = TradeMonitor._position_key(signal.market_id, signal.token_id, signal.outcome)
+        return sellable_positions.get(key)
+
+    @staticmethod
+    def _is_sell_signal_residual_too_small(signal: WalletTradeSignal, position: Position) -> bool:
+        execution_price = max(signal.price_cents / 100.0, settings.min_valid_price)
+        available_size_usd = max(position.quantity, 0.0) * execution_price
+        requested_size_usd = max(signal.size_usd, 0.0)
+        if requested_size_usd <= 0:
+            requested_size_usd = available_size_usd
+        trimmed = min(available_size_usd, requested_size_usd)
+        return trimmed < settings.min_trade_size_usd
 
     @classmethod
     def _is_market_tradeable(cls, *, signal: WalletTradeSignal, is_short_term: bool) -> bool:
