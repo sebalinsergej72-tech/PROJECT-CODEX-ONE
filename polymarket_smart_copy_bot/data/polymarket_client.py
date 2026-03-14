@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import ssl
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import aiohttp
@@ -122,6 +124,18 @@ class PolymarketClient:
         self._clob_creds_source: str | None = None
         self._dry_run = settings.dry_run
         self._missing_orderbooks: set[str] = set()
+        self._market_ws_task: asyncio.Task[None] | None = None
+        self._market_ws_ping_task: asyncio.Task[None] | None = None
+        self._market_ws: aiohttp.ClientWebSocketResponse | None = None
+        self._market_ws_stop = asyncio.Event()
+        self._market_ws_wakeup = asyncio.Event()
+        self._market_ws_desired_assets: set[str] = set()
+        self._market_ws_subscribed_assets: set[str] = set()
+        self._market_ws_books: dict[str, dict[str, dict[float, float]]] = {}
+        self._market_ws_book_updated_at: dict[str, datetime] = {}
+        self._market_ws_waiters: dict[str, asyncio.Event] = {}
+        self._market_ws_lock = asyncio.Lock()
+        self._market_ws_send_lock = asyncio.Lock()
 
     def set_dry_run(self, enabled: bool) -> None:
         self._dry_run = enabled
@@ -139,8 +153,30 @@ class PolymarketClient:
                 logger.warning("POLYMARKET_VERIFY_SSL=false: TLS verification disabled for Polymarket HTTP calls")
                 connector = aiohttp.TCPConnector(ssl=False)
             self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        if settings.polymarket_market_ws_enabled and self._market_ws_task is None:
+            self._market_ws_stop.clear()
+            self._market_ws_task = asyncio.create_task(
+                self._run_market_ws_loop(),
+                name="polymarket-market-ws",
+            )
 
     async def stop(self) -> None:
+        self._market_ws_stop.set()
+        self._market_ws_wakeup.set()
+        if self._market_ws_ping_task is not None:
+            self._market_ws_ping_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._market_ws_ping_task
+            self._market_ws_ping_task = None
+        if self._market_ws is not None:
+            with contextlib.suppress(Exception):
+                await self._market_ws.close()
+            self._market_ws = None
+        if self._market_ws_task is not None:
+            self._market_ws_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._market_ws_task
+            self._market_ws_task = None
         if self._session is not None:
             await self._session.close()
             self._session = None
@@ -407,6 +443,19 @@ class PolymarketClient:
         if normalized_token in self._missing_orderbooks:
             return None
 
+        cached = self._get_market_ws_snapshot(normalized_token)
+        if cached is not None:
+            return cached
+
+        if settings.polymarket_market_ws_enabled:
+            await self.prime_market_data([normalized_token])
+            cached = await self._wait_for_market_ws_snapshot(
+                normalized_token,
+                timeout_seconds=settings.polymarket_market_ws_bootstrap_timeout_seconds,
+            )
+            if cached is not None:
+                return cached
+
         url = f"{settings.polymarket_host.rstrip('/')}/book"
         try:
             raw = await self._request_json("GET", url, params={"token_id": normalized_token})
@@ -421,7 +470,287 @@ class PolymarketClient:
         snapshot = self._parse_orderbook_snapshot(raw)
         if snapshot is None:
             logger.warning("Failed to parse orderbook for token {}", normalized_token)
+            return None
+        self._store_market_ws_snapshot(normalized_token, snapshot)
         return snapshot
+
+    async def prime_market_data(self, token_ids: list[str | None]) -> None:
+        if not settings.polymarket_market_ws_enabled:
+            return
+        normalized = {
+            str(token_id).strip()
+            for token_id in token_ids
+            if str(token_id or "").strip() and str(token_id).strip() not in self._missing_orderbooks
+        }
+        if not normalized:
+            return
+        async with self._market_ws_lock:
+            newly_desired = normalized - self._market_ws_desired_assets
+            if not newly_desired:
+                return
+            self._market_ws_desired_assets.update(newly_desired)
+            for token_id in newly_desired:
+                self._market_ws_waiters.setdefault(token_id, asyncio.Event())
+            self._market_ws_wakeup.set()
+        await self._send_market_ws_subscription(sorted(newly_desired))
+
+    async def _run_market_ws_loop(self) -> None:
+        while not self._market_ws_stop.is_set():
+            if not self._market_ws_desired_assets:
+                self._market_ws_wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._market_ws_wakeup.wait(), timeout=1.0)
+                except TimeoutError:
+                    continue
+                if self._market_ws_stop.is_set():
+                    break
+
+            session = await self._ensure_session()
+            try:
+                async with session.ws_connect(
+                    settings.polymarket_market_ws_url,
+                    heartbeat=None,
+                    autoping=True,
+                ) as websocket:
+                    self._market_ws = websocket
+                    self._market_ws_subscribed_assets.clear()
+                    self._market_ws_ping_task = asyncio.create_task(
+                        self._run_market_ws_ping_loop(websocket),
+                        name="polymarket-market-ws-ping",
+                    )
+                    await self._send_market_ws_subscription(list(self._market_ws_desired_assets), initial_dump=True)
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            self._handle_market_ws_message(message.data)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                            aiohttp.WSMsgType.ERROR,
+                        }:
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Polymarket market websocket disconnected: {}", exc)
+            finally:
+                if self._market_ws_ping_task is not None:
+                    self._market_ws_ping_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._market_ws_ping_task
+                    self._market_ws_ping_task = None
+                self._market_ws = None
+                self._market_ws_subscribed_assets.clear()
+
+            if not self._market_ws_stop.is_set():
+                await asyncio.sleep(settings.polymarket_market_ws_reconnect_seconds)
+
+    async def _run_market_ws_ping_loop(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
+        while not self._market_ws_stop.is_set() and not websocket.closed:
+            await asyncio.sleep(max(1, settings.polymarket_market_ws_ping_seconds))
+            async with self._market_ws_send_lock:
+                if websocket.closed:
+                    return
+                await websocket.send_str("PING")
+
+    async def _send_market_ws_subscription(self, token_ids: list[str], *, initial_dump: bool = False) -> None:
+        if not token_ids:
+            return
+        websocket = self._market_ws
+        if websocket is None or websocket.closed:
+            return
+        token_ids = [token_id for token_id in token_ids if token_id not in self._market_ws_subscribed_assets]
+        if not token_ids:
+            return
+        payload = {
+            "assets_ids": token_ids,
+            "type": "market",
+            "custom_feature_enabled": True,
+        }
+        if initial_dump:
+            payload["initial_dump"] = True
+        async with self._market_ws_send_lock:
+            if websocket.closed:
+                return
+            await websocket.send_json(payload)
+        self._market_ws_subscribed_assets.update(token_ids)
+
+    def _handle_market_ws_message(self, message: str) -> None:
+        if not message or message == "PONG":
+            return
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            logger.debug("Ignoring non-JSON market ws message: {}", message[:200])
+            return
+        self._handle_market_ws_payload(payload)
+
+    def _handle_market_ws_payload(self, payload: Any) -> None:
+        if isinstance(payload, list):
+            for item in payload:
+                self._handle_market_ws_payload(item)
+            return
+        if not isinstance(payload, dict):
+            return
+
+        event_type = str(payload.get("event_type") or payload.get("type") or "").lower()
+        asset_id = str(payload.get("asset_id") or payload.get("asset") or payload.get("token_id") or "").strip()
+
+        if event_type == "book" and asset_id:
+            snapshot = self._parse_orderbook_snapshot(payload)
+            if snapshot is not None:
+                self._store_market_ws_snapshot(asset_id, snapshot)
+            return
+
+        if event_type == "price_change" and asset_id:
+            self._apply_market_ws_price_change(asset_id, payload)
+            return
+
+        if event_type == "best_bid_ask" and asset_id:
+            self._apply_market_ws_best_bid_ask(asset_id, payload)
+
+    def _store_market_ws_snapshot(self, token_id: str, snapshot: OrderbookSnapshot) -> None:
+        normalized_token = str(token_id).strip()
+        self._market_ws_books[normalized_token] = {
+            "bids": {level.price: level.size for level in snapshot.bids},
+            "asks": {level.price: level.size for level in snapshot.asks},
+        }
+        self._market_ws_book_updated_at[normalized_token] = datetime.now(tz=timezone.utc)
+        waiter = self._market_ws_waiters.get(normalized_token)
+        if waiter is not None:
+            waiter.set()
+
+    def _apply_market_ws_price_change(self, token_id: str, payload: dict[str, Any]) -> None:
+        book = self._market_ws_books.setdefault(token_id, {"bids": {}, "asks": {}})
+        updates = payload.get("changes") or payload.get("price_changes") or payload.get("priceChanges") or [payload]
+        if not isinstance(updates, list):
+            updates = [updates]
+        updated = False
+        for change in updates:
+            if not isinstance(change, dict):
+                continue
+            side = str(change.get("side") or change.get("book_side") or "").lower()
+            price_raw = change.get("price") or change.get("p")
+            size_raw = (
+                change.get("size")
+                or change.get("quantity")
+                or change.get("amount")
+                or change.get("shares")
+            )
+            try:
+                price = float(price_raw)
+                size = float(size_raw)
+            except (TypeError, ValueError):
+                continue
+            if price > 1.0:
+                price /= 100.0
+            price = self._validate_price(price)
+            if price is None:
+                continue
+            side_key = "bids" if side in {"buy", "bid", "bids"} else "asks"
+            if size <= 0:
+                book[side_key].pop(price, None)
+            else:
+                book[side_key][price] = size
+            updated = True
+        if updated:
+            self._market_ws_book_updated_at[token_id] = datetime.now(tz=timezone.utc)
+            waiter = self._market_ws_waiters.get(token_id)
+            if waiter is not None:
+                waiter.set()
+
+    def _apply_market_ws_best_bid_ask(self, token_id: str, payload: dict[str, Any]) -> None:
+        book = self._market_ws_books.setdefault(token_id, {"bids": {}, "asks": {}})
+        best_bid = self._normalize_ws_price(payload.get("best_bid") or payload.get("bestBid"))
+        best_ask = self._normalize_ws_price(payload.get("best_ask") or payload.get("bestAsk"))
+        bid_size = self._parse_float(payload.get("best_bid_size") or payload.get("bestBidSize")) or 0.0
+        ask_size = self._parse_float(payload.get("best_ask_size") or payload.get("bestAskSize")) or 0.0
+        updated = False
+        if best_bid is not None:
+            if bid_size <= 0:
+                book["bids"].pop(best_bid, None)
+            else:
+                book["bids"][best_bid] = bid_size
+            updated = True
+        if best_ask is not None:
+            if ask_size <= 0:
+                book["asks"].pop(best_ask, None)
+            else:
+                book["asks"][best_ask] = ask_size
+            updated = True
+        if updated:
+            self._market_ws_book_updated_at[token_id] = datetime.now(tz=timezone.utc)
+            waiter = self._market_ws_waiters.get(token_id)
+            if waiter is not None:
+                waiter.set()
+
+    def _get_market_ws_snapshot(self, token_id: str) -> OrderbookSnapshot | None:
+        updated_at = self._market_ws_book_updated_at.get(token_id)
+        book = self._market_ws_books.get(token_id)
+        if updated_at is None or book is None:
+            return None
+        ttl = timedelta(seconds=max(1, settings.polymarket_market_ws_cache_ttl_seconds))
+        if datetime.now(tz=timezone.utc) - updated_at > ttl:
+            return None
+        return self._build_snapshot_from_market_ws_book(book)
+
+    async def _wait_for_market_ws_snapshot(
+        self,
+        token_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> OrderbookSnapshot | None:
+        cached = self._get_market_ws_snapshot(token_id)
+        if cached is not None:
+            return cached
+        if timeout_seconds <= 0:
+            return None
+        waiter = self._market_ws_waiters.setdefault(token_id, asyncio.Event())
+        waiter.clear()
+        try:
+            await asyncio.wait_for(waiter.wait(), timeout=timeout_seconds)
+        except TimeoutError:
+            return None
+        return self._get_market_ws_snapshot(token_id)
+
+    @classmethod
+    def _build_snapshot_from_market_ws_book(cls, book: dict[str, dict[float, float]]) -> OrderbookSnapshot | None:
+        bids = [
+            OrderbookLevel(price=price, size=size)
+            for price, size in sorted(book.get("bids", {}).items(), key=lambda item: item[0], reverse=True)
+            if price > 0 and size > 0
+        ]
+        asks = [
+            OrderbookLevel(price=price, size=size)
+            for price, size in sorted(book.get("asks", {}).items(), key=lambda item: item[0])
+            if price > 0 and size > 0
+        ]
+        if not bids and not asks:
+            return None
+        return OrderbookSnapshot(
+            bids=bids,
+            asks=asks,
+            best_bid=bids[0].price if bids else None,
+            best_ask=asks[0].price if asks else None,
+        )
+
+    @classmethod
+    def _normalize_ws_price(cls, value: Any) -> float | None:
+        parsed = cls._parse_float(value)
+        if parsed is None:
+            return None
+        if parsed > 1.0:
+            parsed /= 100.0
+        return cls._validate_price(parsed)
+
+    @staticmethod
+    def _parse_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     async def fetch_market_info(self, market_id: str) -> MarketInfoData:
         """Fetch human-readable market question and category.
