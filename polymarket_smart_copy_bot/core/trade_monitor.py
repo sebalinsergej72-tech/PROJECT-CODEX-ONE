@@ -290,8 +290,9 @@ class TradeMonitor:
         short_term_enabled: bool,
     ) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
+        normalized_signals = TradeMonitor._aggregate_signals(signals, existing_ids=existing_ids)
 
-        for signal in signals:
+        for signal in normalized_signals:
             if signal.external_trade_id in existing_ids:
                 continue
 
@@ -343,6 +344,92 @@ class TradeMonitor:
                 break
 
         return intents
+
+    @staticmethod
+    def _aggregate_signals(
+        signals: list[WalletTradeSignal],
+        *,
+        existing_ids: set[str],
+    ) -> list[WalletTradeSignal]:
+        if not settings.burst_aggregation_enabled or len(signals) <= 1:
+            return signals
+
+        window_seconds = max(0, settings.burst_aggregation_window_seconds)
+        max_trades = max(1, settings.burst_aggregation_max_trades)
+        if window_seconds <= 0:
+            return signals
+
+        aggregated: list[WalletTradeSignal] = []
+        cluster: list[WalletTradeSignal] = []
+
+        def flush() -> None:
+            nonlocal cluster
+            if not cluster:
+                return
+            aggregated.append(TradeMonitor._merge_signal_cluster(cluster))
+            cluster = []
+
+        for signal in signals:
+            if signal.external_trade_id in existing_ids:
+                flush()
+                aggregated.append(signal)
+                continue
+
+            if not cluster:
+                cluster = [signal]
+                continue
+
+            previous = cluster[-1]
+            same_burst = (
+                signal.wallet_address.lower() == previous.wallet_address.lower()
+                and signal.market_id == previous.market_id
+                and (signal.token_id or "") == (previous.token_id or "")
+                and signal.outcome.lower() == previous.outcome.lower()
+                and signal.side.lower() == previous.side.lower()
+                and abs((cluster[0].traded_at - signal.traded_at).total_seconds()) <= window_seconds
+                and len(cluster) < max_trades
+            )
+            if same_burst:
+                cluster.append(signal)
+                continue
+
+            flush()
+            cluster = [signal]
+
+        flush()
+        return aggregated
+
+    @staticmethod
+    def _merge_signal_cluster(cluster: list[WalletTradeSignal]) -> WalletTradeSignal:
+        if len(cluster) == 1:
+            return cluster[0]
+
+        first = cluster[0]
+        last = cluster[-1]
+        total_size_usd = sum(max(signal.size_usd, 0.0) for signal in cluster)
+        if total_size_usd > 0:
+            weighted_price = sum(signal.price_cents * signal.size_usd for signal in cluster) / total_size_usd
+        else:
+            weighted_price = first.price_cents
+        realized_profit = sum(signal.profit_usd or 0.0 for signal in cluster)
+        external_trade_id = (
+            f"agg:{first.wallet_address.lower()}:{first.market_id}:{first.side.lower()}:"
+            f"{first.external_trade_id}:{last.external_trade_id}:{len(cluster)}"
+        )
+        return WalletTradeSignal(
+            external_trade_id=external_trade_id,
+            wallet_address=first.wallet_address,
+            market_id=first.market_id,
+            token_id=first.token_id,
+            outcome=first.outcome,
+            side=first.side,
+            price_cents=weighted_price,
+            size_usd=total_size_usd,
+            traded_at=first.traded_at,
+            profit_usd=realized_profit,
+            market_slug=first.market_slug,
+            market_category=first.market_category,
+        )
 
     @classmethod
     def _build_reconcile_close_intents(

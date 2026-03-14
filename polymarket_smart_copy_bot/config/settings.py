@@ -218,6 +218,9 @@ class Settings(BaseSettings):
     trade_reconcile_interval_seconds: int = Field(default=60, alias="TRADE_RECONCILE_INTERVAL_SECONDS")
     account_sync_ttl_seconds: int = Field(default=30, alias="ACCOUNT_SYNC_TTL_SECONDS")
     trade_monitor_signal_fetch_limit: int = Field(default=8, alias="TRADE_MONITOR_SIGNAL_FETCH_LIMIT")
+    burst_aggregation_enabled: bool = Field(default=True, alias="BURST_AGGREGATION_ENABLED")
+    burst_aggregation_window_seconds: int = Field(default=20, alias="BURST_AGGREGATION_WINDOW_SECONDS")
+    burst_aggregation_max_trades: int = Field(default=8, alias="BURST_AGGREGATION_MAX_TRADES")
     portfolio_refresh_seconds: int = Field(default=120, alias="PORTFOLIO_REFRESH_SECONDS")
     capital_recalc_interval_minutes: int = Field(default=60, alias="CAPITAL_RECALC_INTERVAL_MINUTES")
     stale_order_cleanup_interval_seconds: int = Field(
