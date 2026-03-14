@@ -347,3 +347,115 @@ def test_discovery_disables_stale_strict_wallet_and_uses_fresh_reserve_for_live_
         assert stale_row.last_trade_ts is not None
 
     asyncio.run(_run_with_session(_case))
+
+
+def test_discovery_live_pool_keeps_two_non_sports_wallets_when_available() -> None:
+    sports_a = CandidateSeed(
+        address="0x1111111111111111111111111111111111111111",
+        name="sports-a",
+        niches={"sports"},
+        monthly_pnl_pct=0.11,
+        win_rate_hint=0.70,
+        trades_90d_hint=180,
+        trades_30d_hint=30,
+        profit_factor_hint=1.8,
+        avg_size_hint=1200.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    sports_b = CandidateSeed(
+        address="0x2222222222222222222222222222222222222222",
+        name="sports-b",
+        niches={"sports"},
+        monthly_pnl_pct=0.10,
+        win_rate_hint=0.69,
+        trades_90d_hint=170,
+        trades_30d_hint=28,
+        profit_factor_hint=1.75,
+        avg_size_hint=1100.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    sports_c = CandidateSeed(
+        address="0x3333333333333333333333333333333333333333",
+        name="sports-c",
+        niches={"sports"},
+        monthly_pnl_pct=0.095,
+        win_rate_hint=0.68,
+        trades_90d_hint=165,
+        trades_30d_hint=27,
+        profit_factor_hint=1.7,
+        avg_size_hint=1000.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    politics_a = CandidateSeed(
+        address="0x4444444444444444444444444444444444444444",
+        name="politics-a",
+        niches={"politics"},
+        monthly_pnl_pct=0.085,
+        win_rate_hint=0.67,
+        trades_90d_hint=150,
+        trades_30d_hint=24,
+        profit_factor_hint=1.6,
+        avg_size_hint=700.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+    politics_b = CandidateSeed(
+        address="0x5555555555555555555555555555555555555555",
+        name="politics-b",
+        niches={"politics"},
+        monthly_pnl_pct=0.08,
+        win_rate_hint=0.66,
+        trades_90d_hint=145,
+        trades_30d_hint=22,
+        profit_factor_hint=1.55,
+        avg_size_hint=650.0,
+        last_trade_ts_hint=utc_now() - timedelta(days=1),
+        consecutive_losses_hint=0,
+        wallet_age_days_hint=120,
+    )
+
+    async def _case(session: AsyncSession) -> None:
+        discovery = WalletDiscovery(_HintOnlyPolymarketClient(), _DummyNotifications())
+        original_limit = settings.max_wallets_aggressive
+        original_min_non_sports = settings.live_pool_min_non_sports_aggressive
+        try:
+            settings.max_wallets_aggressive = 4
+            settings.live_pool_min_non_sports_aggressive = 2
+
+            async def _fetch_candidate_seeds():
+                return {
+                    sports_a.address: sports_a,
+                    sports_b.address: sports_b,
+                    sports_c.address: sports_c,
+                    politics_a.address: politics_a,
+                    politics_b.address: politics_b,
+                }
+
+            discovery._fetch_candidate_seeds = _fetch_candidate_seeds
+            await discovery.discover_and_score(session, auto_add=True, risk_mode="aggressive")
+            rows = (
+                await session.execute(select(QualifiedWallet).order_by(QualifiedWallet.address.asc()))
+            ).scalars().all()
+        finally:
+            settings.max_wallets_aggressive = original_limit
+            settings.live_pool_min_non_sports_aggressive = original_min_non_sports
+
+        enabled = [row for row in rows if row.enabled]
+        enabled_addresses = {row.address for row in enabled}
+        non_sports_enabled = [
+            row for row in enabled if "sports" not in {part.strip().lower() for part in (row.niche or "").split(",")}
+        ]
+
+        assert len(enabled) == 4
+        assert len(non_sports_enabled) >= 2
+        assert politics_a.address in enabled_addresses
+        assert politics_b.address in enabled_addresses
+
+    asyncio.run(_run_with_session(_case))
