@@ -131,12 +131,12 @@ class Settings(BaseSettings):
     discovery_autoadd_default: bool = Field(default=True, alias="DISCOVERY_AUTOADD")
     # === DISCOVERY FILTERS ===
     # Aggressive (default)
-    discovery_min_trades_aggressive: int = Field(default=120, alias="DISCOVERY_MIN_TRADES_AGGRESSIVE")
-    discovery_min_winrate_aggressive: float = Field(default=0.65, alias="DISCOVERY_MIN_WINRATE_AGGRESSIVE")
+    discovery_min_trades_aggressive: int = Field(default=100, alias="DISCOVERY_MIN_TRADES_AGGRESSIVE")
+    discovery_min_winrate_aggressive: float = Field(default=0.62, alias="DISCOVERY_MIN_WINRATE_AGGRESSIVE")
     discovery_min_profit_factor_aggressive: float = Field(
-        default=1.55, alias="DISCOVERY_MIN_PROFIT_FACTOR_AGGRESSIVE"
+        default=1.30, alias="DISCOVERY_MIN_PROFIT_FACTOR_AGGRESSIVE"
     )
-    discovery_min_avg_size_aggressive: float = Field(default=350.0, alias="DISCOVERY_MIN_AVG_SIZE_AGGRESSIVE")
+    discovery_min_avg_size_aggressive: float = Field(default=200.0, alias="DISCOVERY_MIN_AVG_SIZE_AGGRESSIVE")
     discovery_max_consec_losses_aggressive: int = Field(default=5, alias="DISCOVERY_MAX_CONSEC_LOSSES_AGGRESSIVE")
     discovery_min_wallet_age_aggressive: int = Field(default=30, alias="DISCOVERY_MIN_WALLET_AGE_AGGRESSIVE")
 
