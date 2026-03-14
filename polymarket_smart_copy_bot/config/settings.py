@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     polymarket_data_api_host: str = Field(
         default="https://data-api.polymarket.com", alias="POLYMARKET_DATA_API_HOST"
     )
+    polymarket_market_ws_url: str = Field(
+        default="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        alias="POLYMARKET_MARKET_WS_URL",
+    )
+    polymarket_user_ws_url: str = Field(
+        default="wss://ws-subscriptions-clob.polymarket.com/ws/user",
+        alias="POLYMARKET_USER_WS_URL",
+    )
     polymarket_chain_id: int = Field(default=137, alias="POLYMARKET_CHAIN_ID")
     polymarket_private_key: str | None = Field(default=None, alias="POLYMARKET_PRIVATE_KEY")
     polymarket_proxy_address: str | None = Field(default=None, alias="POLYMARKET_PROXY_ADDRESS")
@@ -47,6 +55,23 @@ class Settings(BaseSettings):
     polymarket_api_passphrase: str | None = Field(default=None, alias="POLYMARKET_API_PASSPHRASE")
     polymarket_signature_type: int | None = Field(default=None, alias="POLYMARKET_SIGNATURE_TYPE")
     polymarket_verify_ssl: bool = Field(default=True, alias="POLYMARKET_VERIFY_SSL")
+    polymarket_market_ws_enabled: bool = Field(default=True, alias="POLYMARKET_MARKET_WS_ENABLED")
+    polymarket_market_ws_cache_ttl_seconds: int = Field(
+        default=15,
+        alias="POLYMARKET_MARKET_WS_CACHE_TTL_SECONDS",
+    )
+    polymarket_market_ws_bootstrap_timeout_seconds: float = Field(
+        default=0.35,
+        alias="POLYMARKET_MARKET_WS_BOOTSTRAP_TIMEOUT_SECONDS",
+    )
+    polymarket_market_ws_ping_seconds: int = Field(
+        default=15,
+        alias="POLYMARKET_MARKET_WS_PING_SECONDS",
+    )
+    polymarket_market_ws_reconnect_seconds: float = Field(
+        default=2.0,
+        alias="POLYMARKET_MARKET_WS_RECONNECT_SECONDS",
+    )
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
 

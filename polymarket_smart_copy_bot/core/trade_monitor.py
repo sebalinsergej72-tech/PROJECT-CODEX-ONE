@@ -83,6 +83,7 @@ class TradeMonitor:
         reconcile = await self.scan_for_reconcile_intents(session)
         intents = [*fresh, *reconcile]
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
+        await self._prime_market_data(intents)
         return intents[:60]
 
     async def scan_for_fresh_trade_intents(self, session: AsyncSession) -> list[TradeIntent]:
@@ -179,6 +180,18 @@ class TradeMonitor:
 
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
         return intents[:60]
+
+    async def _prime_market_data(self, intents: list[TradeIntent]) -> None:
+        prime_market_data = getattr(self.polymarket_client, "prime_market_data", None)
+        if not callable(prime_market_data):
+            return
+        token_ids = [intent.token_id for intent in intents if intent.token_id]
+        if not token_ids:
+            return
+        try:
+            await prime_market_data(token_ids)
+        except Exception as exc:
+            logger.debug("Market data prewarm failed: {}", exc)
 
     @staticmethod
     async def _load_enabled_wallets(
