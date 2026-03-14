@@ -78,6 +78,54 @@ class _DummySellPolymarketClient(_DummyPolymarketClient):
         ]
 
 
+class _BurstPolymarketClient(_DummyPolymarketClient):
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        self.trade_calls += 1
+        self.trade_limits.append(limit)
+        now = utc_now()
+        return [
+            WalletTradeSignal(
+                external_trade_id="burst-1",
+                wallet_address=wallet_address,
+                market_id="market-burst",
+                token_id="token-burst",
+                outcome="Yes",
+                side="buy",
+                price_cents=55.0,
+                size_usd=10.0,
+                traded_at=now,
+                market_slug="burst-market",
+                market_category="Politics",
+            ),
+            WalletTradeSignal(
+                external_trade_id="burst-2",
+                wallet_address=wallet_address,
+                market_id="market-burst",
+                token_id="token-burst",
+                outcome="Yes",
+                side="buy",
+                price_cents=57.0,
+                size_usd=20.0,
+                traded_at=now - timedelta(seconds=5),
+                market_slug="burst-market",
+                market_category="Politics",
+            ),
+            WalletTradeSignal(
+                external_trade_id="other-1",
+                wallet_address=wallet_address,
+                market_id="market-other",
+                token_id="token-other",
+                outcome="Yes",
+                side="buy",
+                price_cents=60.0,
+                size_usd=15.0,
+                traded_at=now - timedelta(seconds=40),
+                market_slug="other-market",
+                market_category="Politics",
+            ),
+        ]
+
+
 def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
     async def _case(session: AsyncSession) -> None:
         client = _DummyPolymarketClient()
@@ -108,6 +156,41 @@ def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
         assert client.trade_calls == 1
         assert client.trade_limits == [settings.trade_monitor_signal_fetch_limit]
         assert client.position_calls == 0
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_aggregates_burst_trades_on_same_market() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _BurstPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="burst",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert len(intents) == 2
+        burst_intent = next(intent for intent in intents if intent.market_id == "market-burst")
+        assert burst_intent.external_trade_id.startswith("agg:")
+        assert burst_intent.source_size_usd == 30.0
+        assert round(burst_intent.source_price_cents, 4) == round((55.0 * 10.0 + 57.0 * 20.0) / 30.0, 4)
 
     asyncio.run(_run_with_session(_case))
 
