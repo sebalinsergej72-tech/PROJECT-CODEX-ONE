@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     reserve_min_profit_factor_cons: float = Field(default=1.6, alias="RESERVE_MIN_PROFIT_FACTOR_CONS")
     reserve_min_avg_size_cons: float = Field(default=400.0, alias="RESERVE_MIN_AVG_SIZE_CONS")
     live_pool_max_days_since_last_trade_aggressive: int = Field(
-        default=2,
+        default=4,
         alias="LIVE_POOL_MAX_DAYS_SINCE_LAST_TRADE_AGGRESSIVE",
     )
     live_pool_max_days_since_last_trade_conservative: int = Field(
