@@ -226,9 +226,7 @@ class WalletDiscovery:
             rejected_reasons["no_candidates"] = 1
 
         enabled_limit = self._enabled_limit_for_mode(mode)
-        selected_wallets = [wallet for wallet in scored if self._passes_live_pool_freshness(wallet, now, mode)][
-            :enabled_limit
-        ]
+        selected_wallets = self._select_live_wallets(scored, now, mode, enabled_limit)
         selected_addresses = {row.address for row in selected_wallets}
         stale_strict_wallets = [wallet for wallet in scored if wallet.address not in selected_addresses]
         reserve_wallets = reserve_scored[: max(settings.reserve_wallet_pool_target, 0)]
@@ -1076,6 +1074,10 @@ class WalletDiscovery:
         return settings.max_wallets_aggressive if risk_mode == "aggressive" else settings.max_qualified_wallets
 
     @staticmethod
+    def _minimum_non_sports_for_mode(risk_mode: RiskMode) -> int:
+        return settings.live_pool_min_non_sports_aggressive if risk_mode == "aggressive" else 0
+
+    @staticmethod
     def _dedupe_wallets(wallets: list[ScoredWallet]) -> list[ScoredWallet]:
         ordered: list[ScoredWallet] = []
         seen: set[str] = set()
@@ -1099,6 +1101,64 @@ class WalletDiscovery:
         if last_trade_ts.tzinfo is None:
             last_trade_ts = last_trade_ts.replace(tzinfo=timezone.utc)
         return (now - last_trade_ts) <= timedelta(days=max_days)
+
+    @staticmethod
+    def _is_non_sports_wallet(wallet: ScoredWallet) -> bool:
+        parts = {
+            part.strip().lower()
+            for part in (wallet.niche or "").split(",")
+            if part.strip()
+        }
+        parts -= {"overall", "manual", "seed"}
+        if not parts:
+            return False
+        return any(part != "sports" for part in parts)
+
+    @classmethod
+    def _select_live_wallets(
+        cls,
+        scored: list[ScoredWallet],
+        now: datetime,
+        risk_mode: RiskMode,
+        enabled_limit: int,
+    ) -> list[ScoredWallet]:
+        fresh_strict = [wallet for wallet in scored if cls._passes_live_pool_freshness(wallet, now, risk_mode)]
+        selected = fresh_strict[:enabled_limit]
+        min_non_sports = cls._minimum_non_sports_for_mode(risk_mode)
+        if min_non_sports <= 0 or not selected:
+            return selected
+
+        selected_non_sports = sum(1 for wallet in selected if cls._is_non_sports_wallet(wallet))
+        if selected_non_sports >= min_non_sports:
+            return selected
+
+        replacement_candidates = [
+            wallet
+            for wallet in fresh_strict[enabled_limit:]
+            if cls._is_non_sports_wallet(wallet) and wallet.address not in {row.address for row in selected}
+        ]
+        selected_addresses = {row.address for row in selected}
+
+        for candidate in replacement_candidates:
+            if selected_non_sports >= min_non_sports:
+                break
+            replace_idx = next(
+                (
+                    idx
+                    for idx in range(len(selected) - 1, -1, -1)
+                    if not cls._is_non_sports_wallet(selected[idx])
+                ),
+                None,
+            )
+            if replace_idx is None:
+                break
+            selected_addresses.discard(selected[replace_idx].address)
+            selected[replace_idx] = candidate
+            selected_addresses.add(candidate.address)
+            selected_non_sports = sum(1 for wallet in selected if cls._is_non_sports_wallet(wallet))
+
+        selected.sort(key=lambda row: row.score, reverse=True)
+        return selected
 
     @staticmethod
     def _thresholds_for_mode(risk_mode: RiskMode) -> DiscoveryThresholds:
