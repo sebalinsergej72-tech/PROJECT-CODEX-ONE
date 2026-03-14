@@ -226,11 +226,15 @@ class WalletDiscovery:
             rejected_reasons["no_candidates"] = 1
 
         enabled_limit = self._enabled_limit_for_mode(mode)
-        selected_wallets = scored[:enabled_limit]
+        selected_wallets = [wallet for wallet in scored if self._passes_live_pool_freshness(wallet, now, mode)][
+            :enabled_limit
+        ]
+        selected_addresses = {row.address for row in selected_wallets}
+        stale_strict_wallets = [wallet for wallet in scored if wallet.address not in selected_addresses]
         reserve_wallets = reserve_scored[: max(settings.reserve_wallet_pool_target, 0)]
         reserve_promoted = reserve_wallets[: max(enabled_limit - len(selected_wallets), 0)]
         enabled_addresses = {row.address for row in selected_wallets + reserve_promoted}
-        stored_wallets = selected_wallets + reserve_wallets
+        stored_wallets = self._dedupe_wallets(selected_wallets + reserve_wallets + stale_strict_wallets)
 
         all_existing = (await session.execute(select(QualifiedWallet))).scalars().all()
         existing_by_address = {row.address: row for row in all_existing}
@@ -1070,6 +1074,31 @@ class WalletDiscovery:
     @staticmethod
     def _enabled_limit_for_mode(risk_mode: RiskMode) -> int:
         return settings.max_wallets_aggressive if risk_mode == "aggressive" else settings.max_qualified_wallets
+
+    @staticmethod
+    def _dedupe_wallets(wallets: list[ScoredWallet]) -> list[ScoredWallet]:
+        ordered: list[ScoredWallet] = []
+        seen: set[str] = set()
+        for wallet in wallets:
+            if wallet.address in seen:
+                continue
+            seen.add(wallet.address)
+            ordered.append(wallet)
+        return ordered
+
+    @staticmethod
+    def _passes_live_pool_freshness(wallet: ScoredWallet, now: datetime, risk_mode: RiskMode) -> bool:
+        max_days = (
+            settings.live_pool_max_days_since_last_trade_aggressive
+            if risk_mode == "aggressive"
+            else settings.live_pool_max_days_since_last_trade_conservative
+        )
+        if max_days <= 0 or wallet.last_trade_ts is None:
+            return True
+        last_trade_ts = wallet.last_trade_ts
+        if last_trade_ts.tzinfo is None:
+            last_trade_ts = last_trade_ts.replace(tzinfo=timezone.utc)
+        return (now - last_trade_ts) <= timedelta(days=max_days)
 
     @staticmethod
     def _thresholds_for_mode(risk_mode: RiskMode) -> DiscoveryThresholds:

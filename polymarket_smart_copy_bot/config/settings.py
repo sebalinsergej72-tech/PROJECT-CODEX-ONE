@@ -77,6 +77,14 @@ class Settings(BaseSettings):
         default=30,
         alias="PRICE_MOVED_MARKET_COOLDOWN_MINUTES",
     )
+    no_orderbook_market_cooldown_minutes: int = Field(
+        default=30,
+        alias="NO_ORDERBOOK_MARKET_COOLDOWN_MINUTES",
+    )
+    low_liquidity_market_cooldown_minutes: int = Field(
+        default=15,
+        alias="LOW_LIQUIDITY_MARKET_COOLDOWN_MINUTES",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
@@ -159,6 +167,14 @@ class Settings(BaseSettings):
     reserve_min_winrate_cons: float = Field(default=0.66, alias="RESERVE_MIN_WINRATE_CONS")
     reserve_min_profit_factor_cons: float = Field(default=1.6, alias="RESERVE_MIN_PROFIT_FACTOR_CONS")
     reserve_min_avg_size_cons: float = Field(default=400.0, alias="RESERVE_MIN_AVG_SIZE_CONS")
+    live_pool_max_days_since_last_trade_aggressive: int = Field(
+        default=2,
+        alias="LIVE_POOL_MAX_DAYS_SINCE_LAST_TRADE_AGGRESSIVE",
+    )
+    live_pool_max_days_since_last_trade_conservative: int = Field(
+        default=3,
+        alias="LIVE_POOL_MAX_DAYS_SINCE_LAST_TRADE_CONSERVATIVE",
+    )
     avg_size_score_cap: float = Field(default=50.0, alias="AVG_SIZE_CAP")
     min_attempts_for_tradability_penalty: int = Field(
         default=5,
@@ -173,7 +189,7 @@ class Settings(BaseSettings):
     trade_reconcile_interval_seconds: int = Field(default=60, alias="TRADE_RECONCILE_INTERVAL_SECONDS")
     account_sync_ttl_seconds: int = Field(default=30, alias="ACCOUNT_SYNC_TTL_SECONDS")
     trade_monitor_signal_fetch_limit: int = Field(default=8, alias="TRADE_MONITOR_SIGNAL_FETCH_LIMIT")
-    portfolio_refresh_seconds: int = Field(default=60, alias="PORTFOLIO_REFRESH_SECONDS")
+    portfolio_refresh_seconds: int = Field(default=120, alias="PORTFOLIO_REFRESH_SECONDS")
     capital_recalc_interval_minutes: int = Field(default=60, alias="CAPITAL_RECALC_INTERVAL_MINUTES")
     stale_order_cleanup_interval_seconds: int = Field(
         default=180, alias="STALE_ORDER_CLEANUP_INTERVAL_SECONDS"

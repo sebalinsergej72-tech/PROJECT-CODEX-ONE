@@ -136,6 +136,7 @@ class BackgroundOrchestrator:
         self.last_capital_recalc_at: datetime | None = None
         self.last_stale_order_cleanup_at: datetime | None = None
         self._last_account_sync_at: datetime | None = None
+        self._account_sync_lock = asyncio.Lock()
         self._last_stale_order_cleanup: dict[str, Any] = {
             "ok": True,
             "dry_run": self._dry_run,
@@ -489,15 +490,16 @@ class BackgroundOrchestrator:
         if self._dry_run:
             return
 
-        now = datetime.now(tz=timezone.utc)
-        ttl_seconds = max(0, settings.account_sync_ttl_seconds)
-        if not force and self._last_account_sync_at is not None:
-            elapsed = (now - self._last_account_sync_at).total_seconds()
-            if elapsed < ttl_seconds:
-                return
+        async with self._account_sync_lock:
+            now = datetime.now(tz=timezone.utc)
+            ttl_seconds = max(0, settings.account_sync_ttl_seconds)
+            if not force and self._last_account_sync_at is not None:
+                elapsed = (now - self._last_account_sync_at).total_seconds()
+                if elapsed < ttl_seconds:
+                    return
 
-        await self.portfolio_tracker.sync_account_open_positions(session)
-        self._last_account_sync_at = now
+            await self.portfolio_tracker.sync_account_open_positions(session)
+            self._last_account_sync_at = now
 
     async def _portfolio_refresh(self, session: AsyncSession) -> None:
         await self.trade_executor.reconcile_open_trade_states(session)
@@ -506,7 +508,6 @@ class BackgroundOrchestrator:
             if api_balance is not None and api_balance >= 0:
                 await self.portfolio_tracker.update_capital_base(session, api_balance)
 
-        await self._maybe_sync_account_positions(session, force=False)
         await self.portfolio_tracker.mark_to_market(session)
 
         self._last_portfolio_state = await self.portfolio_tracker.record_snapshot(session, risk_mode=self._risk_mode)

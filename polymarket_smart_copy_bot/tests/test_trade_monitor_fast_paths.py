@@ -57,6 +57,27 @@ class _DummyPolymarketClient:
         return []
 
 
+class _DummySellPolymarketClient(_DummyPolymarketClient):
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        self.trade_calls += 1
+        self.trade_limits.append(limit)
+        return [
+            WalletTradeSignal(
+                external_trade_id="sell-trade-1",
+                wallet_address=wallet_address,
+                market_id="market-sell-1",
+                token_id="token-sell-1",
+                outcome="Yes",
+                side="sell",
+                price_cents=55.0,
+                size_usd=12.0,
+                traded_at=utc_now(),
+                market_slug="safe-market",
+                market_category="Politics",
+            )
+        ]
+
+
 def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
     async def _case(session: AsyncSession) -> None:
         client = _DummyPolymarketClient()
@@ -182,6 +203,177 @@ def test_fast_trade_scan_allows_signal_after_price_moved_cooldown_expires() -> N
 
         assert len(intents) == 1
         assert intents[0].market_id == "market-1"
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_signal_on_recent_no_orderbook_cooldown() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="fast",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="old-no-orderbook",
+                wallet_address=wallet_address,
+                market_id="market-1",
+                token_id="token-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=55.0,
+                size_usd=12.0,
+                status=TradeStatus.SKIPPED.value,
+                reason="no_orderbook",
+                copied_at=utc_now(),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_signal_on_recent_low_liquidity_cooldown() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="fast",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="old-low-liquidity",
+                wallet_address=wallet_address,
+                market_id="market-1",
+                token_id="token-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                price_cents=55.0,
+                size_usd=12.0,
+                status=TradeStatus.SKIPPED.value,
+                reason="low_liquidity:1.20<15.00",
+                copied_at=utc_now(),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_sell_signal_without_local_position() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummySellPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="sell",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_sell_signal_with_residual_too_small_position() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummySellPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="sell",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            Position(
+                wallet_address="account_sync",
+                market_id="market-sell-1",
+                token_id="token-sell-1",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                quantity=0.01,
+                avg_price_cents=55.0,
+                current_price_cents=55.0,
+                invested_usd=0.01,
+                is_open=True,
+                opened_at=utc_now() - timedelta(minutes=10),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
 
     asyncio.run(_run_with_session(_case))
 
@@ -352,7 +544,7 @@ def test_portfolio_refresh_uses_ttl_gated_account_sync() -> None:
 
         await BackgroundOrchestrator._portfolio_refresh(orchestrator, None)
 
-        assert calls == [False]
+        assert calls == []
         assert orchestrator.last_portfolio_refresh_at is not None
 
     asyncio.run(_case())
