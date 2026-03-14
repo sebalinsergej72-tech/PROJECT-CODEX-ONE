@@ -68,9 +68,9 @@ class Settings(BaseSettings):
     max_valid_price: float = Field(default=0.99, alias="MAX_VALID_PRICE")
     min_orderbook_liquidity_usd: float = Field(default=15.0, alias="MIN_ORDERBOOK_LIQUIDITY_USD")
     liquidity_buffer_multiplier: float = Field(default=1.5, alias="LIQUIDITY_BUFFER_MULTIPLIER")
-    max_price_deviation_pct: float = Field(default=0.05, alias="MAX_PRICE_DEVIATION_PCT")
+    max_price_deviation_pct: float = Field(default=0.08, alias="MAX_PRICE_DEVIATION_PCT")
     min_absolute_price_deviation_cents: float = Field(
-        default=1.0,
+        default=2.0,
         alias="MIN_ABSOLUTE_PRICE_DEVIATION_CENTS",
     )
     price_moved_market_cooldown_minutes: int = Field(
