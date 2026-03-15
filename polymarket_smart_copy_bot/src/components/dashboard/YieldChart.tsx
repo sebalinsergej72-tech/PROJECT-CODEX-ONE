@@ -17,6 +17,7 @@ export function YieldChart() {
             const date = new Date(snap.taken_at);
             return {
                 timestamp: date.getTime(),
+                axisLabel: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
                 timeLabel: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 dateLabel: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
                 equity: snap.total_equity_usd,
@@ -69,11 +70,11 @@ export function YieldChart() {
                             </linearGradient>
                         </defs>
                         <XAxis
-                            dataKey="timeLabel"
+                            dataKey="axisLabel"
                             axisLine={false}
                             tickLine={false}
                             tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                            minTickGap={30}
+                            minTickGap={24}
                         />
                         <YAxis
                             domain={[minEquity - buffer, maxEquity + buffer]}

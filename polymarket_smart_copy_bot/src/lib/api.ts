@@ -204,7 +204,7 @@ export interface PortfolioSnapshot {
   cumulative_pnl_usd: number;
 }
 
-export async function fetchPortfolioHistory(hours = 24): Promise<PortfolioSnapshot[]> {
+export async function fetchPortfolioHistory(hours = 168): Promise<PortfolioSnapshot[]> {
   const resp = await fetch(`${getBaseUrl()}/portfolio_history?hours=${hours}`);
   if (!resp.ok) throw new Error(`Portfolio History: HTTP ${resp.status}`);
   const data = (await resp.json()) as PortfolioSnapshot[];

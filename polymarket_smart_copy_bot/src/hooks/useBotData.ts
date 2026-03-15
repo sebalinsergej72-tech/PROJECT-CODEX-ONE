@@ -47,7 +47,7 @@ export function useBotOpenOrders(refreshMs = 5000) {
   });
 }
 
-export function usePortfolioHistory(hours = 24, refreshMs = 30000) {
+export function usePortfolioHistory(hours = 168, refreshMs = 30000) {
   return useQuery({
     queryKey: ["bot-portfolio-history", hours],
     queryFn: () => fetchPortfolioHistory(hours),

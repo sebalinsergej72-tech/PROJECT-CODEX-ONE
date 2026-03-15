@@ -47,7 +47,7 @@ async def status(request: Request) -> dict:
 @router.get("/portfolio_history")
 async def portfolio_history(
     request: Request,
-    hours: int = Query(default=24, ge=1, le=168),
+    hours: int = Query(default=168, ge=1, le=168),
     limit: int = Query(default=2000, ge=1, le=10000),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:
