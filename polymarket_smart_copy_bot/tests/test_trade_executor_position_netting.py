@@ -781,6 +781,7 @@ def test_maybe_reprice_submitted_gtc_buy_replaces_order_once() -> None:
     assert client.cancelled_order_ids == ["ord-1"]
     assert len(client.placed_requests) == 1
     assert client.placed_requests[0].order_type == "GTC"
-    assert client.placed_requests[0].price_cents == pytest.approx(60.21, rel=1e-6)
+    expected_price = copied_trade.price_cents * (1 + settings.max_allowed_slippage_bps / 10_000.0)
+    assert client.placed_requests[0].price_cents == pytest.approx(expected_price, rel=1e-6)
     assert copied_trade.order_id == "ord-2"
     assert "repriced_once" in (copied_trade.reason or "")
