@@ -247,7 +247,9 @@ class TradeExecutor:
                 copied_trade.reason = "manual_rejection_or_timeout"
                 return copied_trade.status
 
-        orderbook = await self.polymarket_client.fetch_orderbook(intent.token_id)
+        orderbook = intent.market_snapshot
+        if orderbook is None:
+            orderbook = await self.polymarket_client.fetch_orderbook(intent.token_id)
         tradable, tradability_reason = self._check_market_tradability(
             intent=intent,
             orderbook=orderbook,

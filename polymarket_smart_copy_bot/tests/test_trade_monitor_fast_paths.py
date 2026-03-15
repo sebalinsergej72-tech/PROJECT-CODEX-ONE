@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from config.settings import settings
 from core.background_tasks import BackgroundOrchestrator
-from core.trade_monitor import TradeMonitor
-from data.polymarket_client import WalletOpenPosition, WalletTradeSignal
+from core.trade_monitor import TradeIntent, TradeMonitor
+from data.polymarket_client import OrderbookLevel, OrderbookSnapshot, WalletOpenPosition, WalletTradeSignal
 from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import utc_now
@@ -138,6 +138,26 @@ class _HotLanePolymarketClient(_DummyPolymarketClient):
         return []
 
 
+class _WarmSnapshotPolymarketClient(_DummyPolymarketClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.primed_token_ids: list[str] = []
+        self.snapshot = OrderbookSnapshot(
+            bids=[OrderbookLevel(price=0.54, size=100.0)],
+            asks=[OrderbookLevel(price=0.55, size=100.0)],
+            best_bid=0.54,
+            best_ask=0.55,
+        )
+
+    async def prime_market_data(self, token_ids: list[str | None]) -> None:
+        self.primed_token_ids.extend(str(token_id) for token_id in token_ids if token_id)
+
+    def get_cached_orderbook(self, token_id: str | None) -> OrderbookSnapshot | None:
+        if token_id == "token-1":
+            return self.snapshot
+        return None
+
+
 def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
     async def _case(session: AsyncSession) -> None:
         client = _DummyPolymarketClient()
@@ -263,6 +283,39 @@ def test_fast_trade_scan_prioritizes_hot_wallets_each_cycle() -> None:
             settings.trade_monitor_hot_wallet_target = original_hot_target
             settings.trade_monitor_cold_wallet_batch_size = original_cold_batch_size
             settings.trade_monitor_hot_trade_freshness_hours = original_hot_freshness
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_attaches_warm_market_snapshot_to_intent() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _WarmSnapshotPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="warm",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert len(intents) == 1
+        assert client.primed_token_ids == ["token-1"]
+        assert intents[0].market_snapshot is client.snapshot
 
     asyncio.run(_run_with_session(_case))
 
@@ -737,5 +790,110 @@ def test_portfolio_refresh_uses_ttl_gated_account_sync() -> None:
 
         assert calls == []
         assert orchestrator.last_portfolio_refresh_at is not None
+
+    asyncio.run(_case())
+
+
+def test_execute_trade_intents_prioritizes_fresh_buys_and_recalculates_only_after_executed_status() -> None:
+    class _DummyTradeExecutor:
+        def __init__(self) -> None:
+            self.execution_order: list[str] = []
+            self.status_by_trade_id = {
+                "buy-fast-1": TradeStatus.SKIPPED.value,
+                "buy-fast-2": TradeStatus.SUBMITTED.value,
+                "reconcile_close:sell-1": TradeStatus.SKIPPED.value,
+            }
+
+        async def execute_intent(
+            self,
+            session,
+            intent,
+            portfolio,
+            *,
+            risk_mode,
+            fill_mode,
+            price_filter_enabled,
+            high_conviction_boost_enabled,
+        ):
+            self.execution_order.append(intent.external_trade_id)
+            return self.status_by_trade_id[intent.external_trade_id]
+
+    class _DummyPortfolioTracker:
+        def __init__(self) -> None:
+            self.calculate_calls = 0
+
+        async def calculate_state(self, session, risk_mode):
+            self.calculate_calls += 1
+            return object()
+
+    async def _case() -> None:
+        orchestrator = BackgroundOrchestrator.__new__(BackgroundOrchestrator)
+        orchestrator._risk_mode = "aggressive"
+        orchestrator._price_filter_enabled = True
+        orchestrator._high_conviction_boost_enabled = True
+        orchestrator.trade_executor = _DummyTradeExecutor()
+        orchestrator.portfolio_tracker = _DummyPortfolioTracker()
+
+        intents = [
+            TradeIntent(
+                external_trade_id="reconcile_close:sell-1",
+                wallet_address="0x3333333333333333333333333333333333333333",
+                wallet_score=80.0,
+                wallet_win_rate=0.7,
+                wallet_profit_factor=2.0,
+                wallet_avg_position_size=1000.0,
+                market_id="market-sell",
+                token_id="token-sell",
+                outcome="Yes",
+                side="sell",
+                source_price_cents=55.0,
+                source_size_usd=10.0,
+                is_short_term=False,
+            ),
+            TradeIntent(
+                external_trade_id="buy-fast-1",
+                wallet_address="0x1111111111111111111111111111111111111111",
+                wallet_score=100.0,
+                wallet_win_rate=0.7,
+                wallet_profit_factor=2.0,
+                wallet_avg_position_size=1000.0,
+                market_id="market-buy-1",
+                token_id="token-buy-1",
+                outcome="Yes",
+                side="buy",
+                source_price_cents=55.0,
+                source_size_usd=10.0,
+                is_short_term=False,
+            ),
+            TradeIntent(
+                external_trade_id="buy-fast-2",
+                wallet_address="0x2222222222222222222222222222222222222222",
+                wallet_score=95.0,
+                wallet_win_rate=0.7,
+                wallet_profit_factor=2.0,
+                wallet_avg_position_size=1000.0,
+                market_id="market-buy-2",
+                token_id="token-buy-2",
+                outcome="Yes",
+                side="buy",
+                source_price_cents=55.0,
+                source_size_usd=10.0,
+                is_short_term=False,
+            ),
+        ]
+
+        await BackgroundOrchestrator._execute_trade_intents(
+            orchestrator,
+            None,
+            portfolio=object(),
+            intents=intents,
+        )
+
+        assert orchestrator.trade_executor.execution_order == [
+            "buy-fast-1",
+            "buy-fast-2",
+            "reconcile_close:sell-1",
+        ]
+        assert orchestrator.portfolio_tracker.calculate_calls == 1
 
     asyncio.run(_case())

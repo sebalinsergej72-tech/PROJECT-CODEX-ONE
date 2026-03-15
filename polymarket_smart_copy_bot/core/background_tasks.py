@@ -465,7 +465,7 @@ class BackgroundOrchestrator:
         intents: list[Any],
     ) -> PortfolioState:
         throttler = WalletThrottler()
-        for intent in intents:
+        for intent in self._prioritize_trade_intents(intents):
             if throttler.is_throttled(intent.wallet_address):
                 logger.info("Wallet {} throttled for this scan cycle", intent.wallet_address[:10])
                 continue
@@ -481,10 +481,21 @@ class BackgroundOrchestrator:
             )
             if status in {TradeStatus.FILLED.value, TradeStatus.PARTIAL.value, TradeStatus.SUBMITTED.value}:
                 throttler.record_success(intent.wallet_address)
+                portfolio = await self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode)
             elif status is not None:
                 throttler.record_failure(intent.wallet_address)
-            portfolio = await self.portfolio_tracker.calculate_state(session, risk_mode=self._risk_mode)
         return portfolio
+
+    @staticmethod
+    def _prioritize_trade_intents(intents: list[Any]) -> list[Any]:
+        def is_fast_lane(intent: Any) -> bool:
+            side = str(getattr(intent, "side", "")).lower()
+            external_trade_id = str(getattr(intent, "external_trade_id", ""))
+            return side == "buy" and not external_trade_id.startswith("reconcile_close:")
+
+        fast_lane = [intent for intent in intents if is_fast_lane(intent)]
+        rest = [intent for intent in intents if not is_fast_lane(intent)]
+        return [*fast_lane, *rest]
 
     async def _maybe_sync_account_positions(self, session: AsyncSession, *, force: bool) -> None:
         if self._dry_run:

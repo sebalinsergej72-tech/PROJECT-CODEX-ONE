@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import settings
-from data.polymarket_client import PolymarketClient, WalletOpenPosition, WalletTradeSignal
+from data.polymarket_client import OrderbookSnapshot, PolymarketClient, WalletOpenPosition, WalletTradeSignal
 from models.models import CopiedTrade, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 
@@ -35,6 +35,7 @@ class TradeIntent:
     is_short_term: bool
     market_slug: str | None = None
     market_category: str | None = None
+    market_snapshot: OrderbookSnapshot | None = None
 
 
 class WalletThrottler:
@@ -85,7 +86,7 @@ class TradeMonitor:
         reconcile = await self.scan_for_reconcile_intents(session)
         intents = [*fresh, *reconcile]
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
-        await self._prime_market_data(intents)
+        await self._attach_market_snapshots(intents)
         return intents[:60]
 
     async def scan_for_fresh_trade_intents(self, session: AsyncSession) -> list[TradeIntent]:
@@ -135,6 +136,7 @@ class TradeMonitor:
             intents.extend(wallet_intents)
 
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
+        await self._attach_market_snapshots(intents)
         return intents[:60]
 
     async def scan_for_reconcile_intents(self, session: AsyncSession) -> list[TradeIntent]:
@@ -186,6 +188,7 @@ class TradeMonitor:
             intents.extend(reconcile_intents)
 
         intents.sort(key=lambda intent: intent.wallet_score, reverse=True)
+        await self._attach_market_snapshots(intents)
         return intents[:60]
 
     async def _prime_market_data(self, intents: list[TradeIntent]) -> None:
@@ -199,6 +202,21 @@ class TradeMonitor:
             await prime_market_data(token_ids)
         except Exception as exc:
             logger.debug("Market data prewarm failed: {}", exc)
+
+    async def _attach_market_snapshots(self, intents: list[TradeIntent]) -> None:
+        if not intents:
+            return
+        await self._prime_market_data(intents)
+        get_cached_orderbook = getattr(self.polymarket_client, "get_cached_orderbook", None)
+        if not callable(get_cached_orderbook):
+            return
+        for intent in intents:
+            if not intent.token_id:
+                continue
+            try:
+                intent.market_snapshot = get_cached_orderbook(intent.token_id)
+            except Exception as exc:
+                logger.debug("Failed to read cached market snapshot for {}: {}", intent.token_id, exc)
 
     @staticmethod
     async def _load_enabled_wallets(

@@ -474,6 +474,12 @@ class PolymarketClient:
         self._store_market_ws_snapshot(normalized_token, snapshot)
         return snapshot
 
+    def get_cached_orderbook(self, token_id: str | None) -> OrderbookSnapshot | None:
+        normalized_token = str(token_id or "").strip()
+        if not normalized_token:
+            return None
+        return self._get_market_ws_snapshot(normalized_token)
+
     async def prime_market_data(self, token_ids: list[str | None]) -> None:
         if not settings.polymarket_market_ws_enabled:
             return
