@@ -59,6 +59,7 @@ class TradeExecutor:
         self.risk_manager = risk_manager
         self.notifications = notifications
         self.portfolio_tracker = portfolio_tracker
+        self._inflight_external_trade_ids: set[str] = set()
 
     async def execute_intent(
         self,
@@ -92,29 +93,40 @@ class TradeExecutor:
         price_filter_enabled: bool,
         high_conviction_boost_enabled: bool,
     ) -> str | None:
+        if intent.external_trade_id in self._inflight_external_trade_ids:
+            logger.debug("Duplicate in-flight trade ignored: {}", intent.external_trade_id)
+            return None
+
+        self._inflight_external_trade_ids.add(intent.external_trade_id)
         intent_side = intent.side.lower()
-        copied_trade = CopiedTrade(
-            external_trade_id=intent.external_trade_id,
-            wallet_address=intent.wallet_address,
-            market_id=intent.market_id,
-            token_id=intent.token_id,
-            outcome=intent.outcome,
-            side=intent_side,
-            price_cents=intent.source_price_cents,
-            size_usd=intent.source_size_usd,
-            status=TradeStatus.PENDING.value,
-            source_timestamp=datetime.now(tz=timezone.utc),
-        )
+        copied_trade = self._build_copied_trade(intent)
         try:
-            async with session.begin_nested():
-                session.add(copied_trade)
-                await session.flush()
-        except IntegrityError as exc:
-            # Cross-worker race: the same external trade can be inserted concurrently.
-            if self._is_duplicate_external_trade(exc):
-                logger.debug("Duplicate trade ignored: {}", intent.external_trade_id)
-                return None
-            raise
+            return await self._execute_copy_trade_impl(
+                session=session,
+                intent=intent,
+                copied_trade=copied_trade,
+                portfolio_state=portfolio_state,
+                risk_mode=risk_mode,
+                fill_mode=fill_mode,
+                price_filter_enabled=price_filter_enabled,
+                high_conviction_boost_enabled=high_conviction_boost_enabled,
+            )
+        finally:
+            self._inflight_external_trade_ids.discard(intent.external_trade_id)
+
+    async def _execute_copy_trade_impl(
+        self,
+        *,
+        session: AsyncSession,
+        intent: TradeIntent,
+        copied_trade: CopiedTrade,
+        portfolio_state: PortfolioState,
+        risk_mode: RiskMode,
+        fill_mode: FillMode,
+        price_filter_enabled: bool,
+        high_conviction_boost_enabled: bool,
+    ) -> str | None:
+        intent_side = intent.side.lower()
 
         existing_position = await self._find_open_position(
             session,
@@ -128,6 +140,7 @@ class TradeExecutor:
         if intent_side == TradeSide.SELL.value and existing_position is None:
             copied_trade.status = TradeStatus.SKIPPED.value
             copied_trade.reason = "sell_without_confirmed_position"
+            self._stage_copied_trade(session, copied_trade)
             logger.info("Trade {} skipped: sell_without_confirmed_position", intent.external_trade_id)
             return copied_trade.status
 
@@ -145,6 +158,7 @@ class TradeExecutor:
             if target_size_usd <= 0:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "mirror_close_zero_size"
+                self._stage_copied_trade(session, copied_trade)
                 logger.info("Trade {} skipped: mirror_close_zero_size", intent.external_trade_id)
                 return copied_trade.status
         else:
@@ -167,6 +181,7 @@ class TradeExecutor:
             if not decision.allowed:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = decision.reason
+                self._stage_copied_trade(session, copied_trade)
                 logger.info("Trade {} skipped: {}", intent.external_trade_id, decision.reason)
                 return copied_trade.status
 
@@ -185,6 +200,7 @@ class TradeExecutor:
             if precheck_size <= 0:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "market_position_cap_reached"
+                self._stage_copied_trade(session, copied_trade)
                 logger.info("Trade {} skipped: market_position_cap_reached", intent.external_trade_id)
                 return copied_trade.status
             if precheck_size < target_size_usd:
@@ -200,6 +216,7 @@ class TradeExecutor:
             if target_size_usd < min_size:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = "below_min_position_size_after_market_cap"
+                self._stage_copied_trade(session, copied_trade)
                 logger.info("Trade {} skipped: below_min_position_size_after_market_cap", intent.external_trade_id)
                 return copied_trade.status
 
@@ -212,10 +229,18 @@ class TradeExecutor:
             if sell_reason is not None:
                 copied_trade.status = TradeStatus.SKIPPED.value
                 copied_trade.reason = sell_reason
+                self._stage_copied_trade(session, copied_trade)
                 logger.info("Trade {} skipped: {}", intent.external_trade_id, sell_reason)
                 return copied_trade.status
 
         if requires_manual_confirmation:
+            try:
+                await self._ensure_copied_trade_persisted(session, copied_trade)
+            except IntegrityError as exc:
+                if self._is_duplicate_external_trade(exc):
+                    logger.debug("Duplicate trade ignored: {}", intent.external_trade_id)
+                    return None
+                raise
             approved = await self._request_manual_confirmation(session, copied_trade, target_size_usd)
             if not approved:
                 copied_trade.status = TradeStatus.SKIPPED.value
@@ -231,6 +256,7 @@ class TradeExecutor:
         if not tradable:
             copied_trade.status = TradeStatus.SKIPPED.value
             copied_trade.reason = tradability_reason
+            self._stage_copied_trade(session, copied_trade)
             logger.info("Trade {} skipped: {}", intent.external_trade_id, tradability_reason)
             return copied_trade.status
 
@@ -245,12 +271,14 @@ class TradeExecutor:
         if execution_plan is None:
             copied_trade.status = TradeStatus.SKIPPED.value
             copied_trade.reason = "slippage_above_hard_limit"
+            self._stage_copied_trade(session, copied_trade)
             logger.warning("Trade {} skipped: slippage_above_hard_limit", intent.external_trade_id)
             return copied_trade.status
 
         result = await self.polymarket_client.place_order(
             execution_plan.order_request
         )
+        self._stage_copied_trade(session, copied_trade)
 
         if not result.success:
             error_text = str(result.error or "")
@@ -728,6 +756,34 @@ class TradeExecutor:
         approval.decision_at = datetime.now(tz=timezone.utc)
 
         return approved
+
+    async def _ensure_copied_trade_persisted(
+        self,
+        session: AsyncSession,
+        copied_trade: CopiedTrade,
+    ) -> None:
+        async with session.begin_nested():
+            session.add(copied_trade)
+            await session.flush()
+
+    @staticmethod
+    def _stage_copied_trade(session: AsyncSession, copied_trade: CopiedTrade) -> None:
+        session.add(copied_trade)
+
+    @staticmethod
+    def _build_copied_trade(intent: TradeIntent) -> CopiedTrade:
+        return CopiedTrade(
+            external_trade_id=intent.external_trade_id,
+            wallet_address=intent.wallet_address,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            outcome=intent.outcome,
+            side=intent.side.lower(),
+            price_cents=intent.source_price_cents,
+            size_usd=intent.source_size_usd,
+            status=TradeStatus.PENDING.value,
+            source_timestamp=datetime.now(tz=timezone.utc),
+        )
 
     @staticmethod
     async def _wallet_current_exposure_usd(session: AsyncSession, wallet_address: str) -> float:

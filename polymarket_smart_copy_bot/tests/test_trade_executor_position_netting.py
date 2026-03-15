@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from core.trade_executor import TradeExecutor
@@ -290,6 +290,91 @@ def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:
         assert row.order_id == "ord-1"
         assert row.ttl_expires_at is not None
         assert "awaiting_fill_monitor" in (row.reason or "")
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_execute_copy_trade_defers_persistence_until_after_place_order() -> None:
+    class _DummyPolymarketClient:
+        def __init__(self, session: AsyncSession) -> None:
+            self.session = session
+
+        async def fetch_orderbook(self, token_id):
+            return OrderbookSnapshot(
+                bids=[OrderbookLevel(price=0.59, size=100.0)],
+                asks=[OrderbookLevel(price=0.60, size=100.0)],
+                best_bid=0.59,
+                best_ask=0.60,
+            )
+
+        async def place_order(self, request):
+            before_submit = (await self.session.execute(select(func.count()).select_from(CopiedTrade))).scalar_one()
+            assert before_submit == 0
+            return type("OrderResult", (), {"success": True, "order_id": "ord-deferred", "tx_hash": "tx-deferred", "error": None})()
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        def evaluate_trade(self, **kwargs):
+            return RiskDecision(
+                allowed=True,
+                reason="ok",
+                target_size_usd=7.0,
+                requires_manual_confirmation=False,
+                wallet_multiplier=1.0,
+                kelly_fraction=0.0,
+            )
+
+        def can_accept_slippage(self, **kwargs):
+            return True, 5.0
+
+        @staticmethod
+        def compute_slippage_bps(**kwargs):
+            return 0.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(session),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+
+        async def _unexpected_reconcile(**kwargs):
+            raise AssertionError("GTC live order should wait for fill monitor")
+
+        executor._reconcile_trade_fill_state = _unexpected_reconcile  # type: ignore[method-assign]
+
+        portfolio = PortfolioState(
+            total_equity_usd=100.0,
+            available_cash_usd=100.0,
+            exposure_usd=0.0,
+            daily_pnl_usd=0.0,
+            cumulative_pnl_usd=0.0,
+            open_positions=0,
+        )
+
+        await executor.execute_copy_trade(
+            session,
+            _intent(side="buy", price_cents=60.0, size_usd=7.0),
+            portfolio,
+            risk_mode="aggressive",
+            fill_mode="conservative",
+            price_filter_enabled=False,
+            high_conviction_boost_enabled=False,
+        )
+
+        row = (await session.execute(select(CopiedTrade))).scalar_one()
+        assert row.status == TradeStatus.SUBMITTED.value
+        assert row.order_id == "ord-deferred"
 
     asyncio.run(_run_with_session(_case))
 
