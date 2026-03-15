@@ -78,6 +78,7 @@ class TradeMonitor:
         self._risk_mode_provider = risk_mode_provider
         self._price_filter_provider = price_filter_provider
         self._short_term_provider = short_term_provider
+        self._cold_wallet_cursor = 0
 
     async def scan_for_trade_intents(self, session: AsyncSession) -> list[TradeIntent]:
         fresh = await self.scan_for_fresh_trade_intents(session)
@@ -94,6 +95,11 @@ class TradeMonitor:
             logger.debug("No qualified wallets to monitor")
             return []
 
+        recent_signal_scores = await self._fetch_recent_wallet_signal_scores(session, qualified_wallets)
+        scan_wallets = self._select_wallets_for_fresh_scan(
+            qualified_wallets,
+            recent_signal_scores=recent_signal_scores,
+        )
         existing_ids = await self._fetch_existing_trade_ids(session)
         cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
         sellable_positions = await self._fetch_local_sellable_positions(session)
@@ -103,12 +109,12 @@ class TradeMonitor:
                 wallet.address,
                 limit=max(1, settings.trade_monitor_signal_fetch_limit),
             )
-            for wallet in qualified_wallets
+            for wallet in scan_wallets
         ]
         fetched_trade_batches = await asyncio.gather(*trade_tasks, return_exceptions=True)
 
         for wallet, trade_batch in zip(
-            qualified_wallets,
+            scan_wallets,
             fetched_trade_batches,
             strict=True,
         ):
@@ -208,6 +214,103 @@ class TradeMonitor:
             .limit(limit)
         )
         return list((await session.execute(query)).scalars().all())
+
+    @staticmethod
+    async def _fetch_recent_wallet_signal_scores(
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+    ) -> dict[str, float]:
+        if not wallets:
+            return {}
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=max(1, settings.trade_monitor_hot_signal_window_hours))
+        wallet_addresses = [wallet.address.lower() for wallet in wallets]
+        query = select(CopiedTrade).where(
+            CopiedTrade.wallet_address.in_(wallet_addresses),
+            CopiedTrade.copied_at >= cutoff,
+        )
+        rows = (await session.execute(query)).scalars().all()
+        scores: dict[str, float] = defaultdict(float)
+        for row in rows:
+            address = row.wallet_address.lower()
+            reason = (row.reason or "").strip().lower()
+            status = (row.status or "").strip().lower()
+            if status in {TradeStatus.SUBMITTED.value, TradeStatus.FILLED.value, TradeStatus.PARTIAL.value}:
+                scores[address] += 4.0
+            elif reason.startswith("price_moved:") or reason == "slippage_above_hard_limit":
+                scores[address] += 2.0
+            elif reason in {"no_orderbook", "sell_without_confirmed_position", "residual_too_small"}:
+                scores[address] += 0.0
+            elif reason.startswith("low_liquidity:"):
+                scores[address] += 0.0
+            else:
+                scores[address] += 1.0
+        return dict(scores)
+
+    def _select_wallets_for_fresh_scan(
+        self,
+        wallets: list[QualifiedWallet],
+        *,
+        recent_signal_scores: dict[str, float],
+    ) -> list[QualifiedWallet]:
+        if len(wallets) <= 1:
+            return wallets
+
+        now = datetime.now(tz=timezone.utc)
+        ranked_wallets = sorted(
+            wallets,
+            key=lambda wallet: self._wallet_polling_rank(
+                wallet,
+                recent_signal_score=recent_signal_scores.get(wallet.address.lower(), 0.0),
+                now=now,
+            ),
+            reverse=True,
+        )
+
+        hot_target = max(1, settings.trade_monitor_hot_wallet_target)
+        cold_batch_size = max(0, settings.trade_monitor_cold_wallet_batch_size)
+        hot_wallets = ranked_wallets[: min(hot_target, len(ranked_wallets))]
+        cold_wallets = ranked_wallets[len(hot_wallets) :]
+        if not cold_wallets or cold_batch_size <= 0:
+            return hot_wallets
+
+        batch_size = min(cold_batch_size, len(cold_wallets))
+        start = self._cold_wallet_cursor % len(cold_wallets)
+        cold_batch = [cold_wallets[(start + idx) % len(cold_wallets)] for idx in range(batch_size)]
+        self._cold_wallet_cursor = (start + batch_size) % len(cold_wallets)
+        return [*hot_wallets, *cold_batch]
+
+    @staticmethod
+    def _wallet_polling_rank(
+        wallet: QualifiedWallet,
+        *,
+        recent_signal_score: float,
+        now: datetime,
+    ) -> tuple[int, float, float, float]:
+        hot_trade_fresh = 0
+        last_trade_ts = TradeMonitor._normalize_wallet_timestamp(wallet.last_trade_ts)
+        if last_trade_ts is not None:
+            age_seconds = (now - last_trade_ts).total_seconds()
+            if age_seconds <= max(1, settings.trade_monitor_hot_trade_freshness_hours) * 3600:
+                hot_trade_fresh = 1
+            recency_score = -age_seconds
+        else:
+            recency_score = float("-inf")
+
+        return (
+            hot_trade_fresh,
+            float(recent_signal_score),
+            recency_score,
+            float(wallet.score),
+        )
+
+    @staticmethod
+    def _normalize_wallet_timestamp(ts: datetime | None) -> datetime | None:
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts
 
     @staticmethod
     async def _fetch_existing_trade_ids(session: AsyncSession) -> set[str]:

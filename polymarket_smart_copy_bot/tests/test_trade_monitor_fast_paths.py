@@ -126,6 +126,18 @@ class _BurstPolymarketClient(_DummyPolymarketClient):
         ]
 
 
+class _HotLanePolymarketClient(_DummyPolymarketClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetched_wallets: list[str] = []
+
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        self.trade_calls += 1
+        self.trade_limits.append(limit)
+        self.fetched_wallets.append(wallet_address.lower())
+        return []
+
+
 def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
     async def _case(session: AsyncSession) -> None:
         client = _DummyPolymarketClient()
@@ -156,6 +168,101 @@ def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
         assert client.trade_calls == 1
         assert client.trade_limits == [settings.trade_monitor_signal_fetch_limit]
         assert client.position_calls == 0
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_prioritizes_hot_wallets_each_cycle() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _HotLanePolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        hot_1 = "0x1111111111111111111111111111111111111111"
+        hot_2 = "0x2222222222222222222222222222222222222222"
+        cold_1 = "0x3333333333333333333333333333333333333333"
+        cold_2 = "0x4444444444444444444444444444444444444444"
+        now = utc_now()
+        session.add_all(
+            [
+                QualifiedWallet(
+                    address=hot_1,
+                    name="hot-1",
+                    score=120.0,
+                    win_rate=0.7,
+                    trades_90d=150,
+                    profit_factor=2.0,
+                    avg_size=1000.0,
+                    niche="overall,politics",
+                    enabled=True,
+                    last_trade_ts=now - timedelta(hours=1),
+                ),
+                QualifiedWallet(
+                    address=hot_2,
+                    name="hot-2",
+                    score=110.0,
+                    win_rate=0.69,
+                    trades_90d=140,
+                    profit_factor=1.9,
+                    avg_size=900.0,
+                    niche="overall,politics",
+                    enabled=True,
+                    last_trade_ts=now - timedelta(hours=2),
+                ),
+                QualifiedWallet(
+                    address=cold_1,
+                    name="cold-1",
+                    score=105.0,
+                    win_rate=0.68,
+                    trades_90d=130,
+                    profit_factor=1.8,
+                    avg_size=850.0,
+                    niche="overall,politics",
+                    enabled=True,
+                    last_trade_ts=now - timedelta(days=3),
+                ),
+                QualifiedWallet(
+                    address=cold_2,
+                    name="cold-2",
+                    score=95.0,
+                    win_rate=0.67,
+                    trades_90d=125,
+                    profit_factor=1.75,
+                    avg_size=800.0,
+                    niche="overall,politics",
+                    enabled=True,
+                    last_trade_ts=now - timedelta(days=4),
+                ),
+            ]
+        )
+        await session.flush()
+
+        original_hot_target = settings.trade_monitor_hot_wallet_target
+        original_cold_batch_size = settings.trade_monitor_cold_wallet_batch_size
+        original_hot_freshness = settings.trade_monitor_hot_trade_freshness_hours
+        try:
+            settings.trade_monitor_hot_wallet_target = 2
+            settings.trade_monitor_cold_wallet_batch_size = 1
+            settings.trade_monitor_hot_trade_freshness_hours = 24
+
+            await monitor.scan_for_fresh_trade_intents(session)
+            first_cycle = list(client.fetched_wallets)
+            client.fetched_wallets.clear()
+
+            await monitor.scan_for_fresh_trade_intents(session)
+            second_cycle = list(client.fetched_wallets)
+
+            assert first_cycle[:2] == [hot_1.lower(), hot_2.lower()]
+            assert second_cycle[:2] == [hot_1.lower(), hot_2.lower()]
+            assert first_cycle[2] == cold_1.lower()
+            assert second_cycle[2] == cold_2.lower()
+        finally:
+            settings.trade_monitor_hot_wallet_target = original_hot_target
+            settings.trade_monitor_cold_wallet_batch_size = original_cold_batch_size
+            settings.trade_monitor_hot_trade_freshness_hours = original_hot_freshness
 
     asyncio.run(_run_with_session(_case))
 

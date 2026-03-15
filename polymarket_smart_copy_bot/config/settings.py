@@ -218,6 +218,19 @@ class Settings(BaseSettings):
     trade_reconcile_interval_seconds: int = Field(default=60, alias="TRADE_RECONCILE_INTERVAL_SECONDS")
     account_sync_ttl_seconds: int = Field(default=30, alias="ACCOUNT_SYNC_TTL_SECONDS")
     trade_monitor_signal_fetch_limit: int = Field(default=8, alias="TRADE_MONITOR_SIGNAL_FETCH_LIMIT")
+    trade_monitor_hot_wallet_target: int = Field(default=6, alias="TRADE_MONITOR_HOT_WALLET_TARGET")
+    trade_monitor_hot_trade_freshness_hours: int = Field(
+        default=24,
+        alias="TRADE_MONITOR_HOT_TRADE_FRESHNESS_HOURS",
+    )
+    trade_monitor_hot_signal_window_hours: int = Field(
+        default=24,
+        alias="TRADE_MONITOR_HOT_SIGNAL_WINDOW_HOURS",
+    )
+    trade_monitor_cold_wallet_batch_size: int = Field(
+        default=4,
+        alias="TRADE_MONITOR_COLD_WALLET_BATCH_SIZE",
+    )
     burst_aggregation_enabled: bool = Field(default=True, alias="BURST_AGGREGATION_ENABLED")
     burst_aggregation_window_seconds: int = Field(default=20, alias="BURST_AGGREGATION_WINDOW_SECONDS")
     burst_aggregation_max_trades: int = Field(default=8, alias="BURST_AGGREGATION_MAX_TRADES")
