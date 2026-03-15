@@ -189,6 +189,7 @@ def test_fast_trade_scan_aggregates_burst_trades_on_same_market() -> None:
         assert len(intents) == 2
         burst_intent = next(intent for intent in intents if intent.market_id == "market-burst")
         assert burst_intent.external_trade_id.startswith("agg:")
+        assert len(burst_intent.external_trade_id) <= 256
         assert burst_intent.source_size_usd == 30.0
         assert round(burst_intent.source_price_cents, 4) == round((55.0 * 10.0 + 57.0 * 20.0) / 30.0, 4)
 

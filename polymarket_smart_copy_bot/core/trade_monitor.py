@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -412,9 +413,10 @@ class TradeMonitor:
         else:
             weighted_price = first.price_cents
         realized_profit = sum(signal.profit_usd or 0.0 for signal in cluster)
-        external_trade_id = (
-            f"agg:{first.wallet_address.lower()}:{first.market_id}:{first.side.lower()}:"
-            f"{first.external_trade_id}:{last.external_trade_id}:{len(cluster)}"
+        external_trade_id = TradeMonitor._build_aggregated_external_trade_id(
+            first=first,
+            last=last,
+            cluster=cluster,
         )
         return WalletTradeSignal(
             external_trade_id=external_trade_id,
@@ -429,6 +431,28 @@ class TradeMonitor:
             profit_usd=realized_profit,
             market_slug=first.market_slug,
             market_category=first.market_category,
+        )
+
+    @staticmethod
+    def _build_aggregated_external_trade_id(
+        *,
+        first: WalletTradeSignal,
+        last: WalletTradeSignal,
+        cluster: list[WalletTradeSignal],
+    ) -> str:
+        wallet_hint = first.wallet_address.lower()[:10]
+        market_hint = first.market_id[:12]
+        token_hint = (first.token_id or "none")[:12]
+        cluster_signature = "|".join(signal.external_trade_id for signal in cluster)
+        payload = (
+            f"{first.wallet_address.lower()}|{first.market_id}|{first.token_id or ''}|"
+            f"{first.outcome.lower()}|{first.side.lower()}|{len(cluster)}|"
+            f"{first.traded_at.isoformat()}|{last.traded_at.isoformat()}|{cluster_signature}"
+        )
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:20]
+        return (
+            f"agg:{wallet_hint}:{market_hint}:{token_hint}:"
+            f"{first.side.lower()}:{len(cluster)}:{digest}"
         )
 
     @classmethod
