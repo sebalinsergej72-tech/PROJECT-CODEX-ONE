@@ -978,6 +978,12 @@ class BackgroundOrchestrator:
             if isinstance(pm_positions_value, (int, float)):
                 display_exposure = round(float(pm_positions_value), 4)
 
+        display_open_positions = self._last_portfolio_state.open_positions
+        if not self._dry_run:
+            pm_positions_count = self._last_exchange_balances.get("positions_count")
+            if isinstance(pm_positions_count, int):
+                display_open_positions = pm_positions_count
+
         return {
             "dry_run": self._dry_run,
             "risk_mode": self._risk_mode,
@@ -988,7 +994,7 @@ class BackgroundOrchestrator:
             "trading_enabled": self._trading_enabled,
             "scheduler_running": self.scheduler.running,
             "tracked_wallets": self._tracked_wallets_count,
-            "open_positions": self._last_portfolio_state.open_positions,
+            "open_positions": display_open_positions,
             "total_equity_usd": display_total_equity,
             "exposure_usd": display_exposure,
             "available_cash_usd": self._last_portfolio_state.available_cash_usd,
@@ -1404,10 +1410,37 @@ class BackgroundOrchestrator:
         ]
         return await self._enrich_with_market_info(session, result)
 
-    @staticmethod
-    async def _count_open_positions(session: AsyncSession) -> int:
-        query = select(func.count()).select_from(Position).where(Position.is_open.is_(True))
-        return int((await session.execute(query)).scalar_one())
+    async def _count_open_positions(self, session: AsyncSession) -> int:
+        base_filters = [
+            Position.is_open.is_(True),
+            Position.quantity > 0,
+            Position.invested_usd > 0,
+        ]
+
+        live_sync_exists = False
+        if not self._dry_run:
+            live_sync_query = select(Position.id).where(
+                Position.wallet_address == self.portfolio_tracker.ACCOUNT_SYNC_WALLET,
+                Position.is_open.is_(True),
+            )
+            live_sync_exists = (await session.execute(live_sync_query.limit(1))).scalar_one_or_none() is not None
+
+        query = select(Position)
+        for condition in base_filters:
+            query = query.where(condition)
+        if live_sync_exists:
+            query = query.where(Position.wallet_address == self.portfolio_tracker.ACCOUNT_SYNC_WALLET)
+
+        rows = (await session.execute(query)).scalars().all()
+
+        from core.portfolio_tracker import PortfolioTracker
+
+        dust_threshold = PortfolioTracker.DUST_VALUE_THRESHOLD_USD
+        return sum(
+            1
+            for row in rows
+            if (row.quantity * row.current_price_cents / 100) >= dust_threshold
+        )
 
     async def _fetch_positions(self, session: AsyncSession, *, open_only: bool, limit: int) -> list[dict[str, Any]]:
         base_filters = []
