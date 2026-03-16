@@ -12,6 +12,27 @@ from models.models import PortfolioSnapshot, WalletScore
 router = APIRouter(tags=["status"])
 
 
+def _downsample_snapshots(snapshots: list[PortfolioSnapshot], limit: int) -> list[PortfolioSnapshot]:
+    if limit <= 0 or len(snapshots) <= limit:
+        return snapshots
+
+    if limit == 1:
+        return [snapshots[-1]]
+
+    last_index = len(snapshots) - 1
+    selected_indexes: list[int] = []
+    for idx in range(limit):
+        position = round(idx * last_index / (limit - 1))
+        if selected_indexes and position == selected_indexes[-1]:
+            continue
+        selected_indexes.append(position)
+
+    if selected_indexes[-1] != last_index:
+        selected_indexes[-1] = last_index
+
+    return [snapshots[index] for index in selected_indexes]
+
+
 @router.get("/status")
 async def status(request: Request) -> dict:
     orchestrator = getattr(request.app.state, "orchestrator", None)
@@ -56,10 +77,9 @@ async def portfolio_history(
         select(PortfolioSnapshot)
         .where(PortfolioSnapshot.taken_at >= since)
         .order_by(PortfolioSnapshot.taken_at.asc())
-        .limit(limit)
     )
     result = await session.execute(query)
-    snapshots = result.scalars().all()
+    snapshots = _downsample_snapshots(result.scalars().all(), limit)
 
     return [
         {
