@@ -192,6 +192,111 @@ def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
     asyncio.run(_run_with_session(_case))
 
 
+def test_fast_trade_scan_skips_recent_repeat_buy_on_same_market() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="repeat-buy-wallet",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        session.add(
+            CopiedTrade(
+                external_trade_id="recent-submitted-buy",
+                wallet_address=wallet_address,
+                market_id="market-1",
+                token_id="token-1",
+                outcome="Yes",
+                side="buy",
+                price_cents=55.0,
+                size_usd=12.0,
+                status=TradeStatus.SUBMITTED.value,
+                copied_at=utc_now(),
+                submitted_at=utc_now(),
+                order_id="order-1",
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_signals_to_intents_only_keeps_first_repeat_buy_in_same_scan() -> None:
+    wallet = QualifiedWallet(
+        address="0x1111111111111111111111111111111111111111",
+        name="repeat-scan-wallet",
+        score=100.0,
+        win_rate=0.7,
+        trades_90d=150,
+        profit_factor=2.0,
+        avg_size=1000.0,
+        niche="overall,politics",
+        enabled=True,
+    )
+    now = utc_now()
+    signals = [
+        WalletTradeSignal(
+            external_trade_id="repeat-buy-1",
+            wallet_address=wallet.address,
+            market_id="market-repeat",
+            token_id="token-repeat",
+            outcome="Yes",
+            side="buy",
+            price_cents=55.0,
+            size_usd=10.0,
+            traded_at=now,
+            market_slug="repeat-market",
+            market_category="Politics",
+        ),
+        WalletTradeSignal(
+            external_trade_id="repeat-buy-2",
+            wallet_address=wallet.address,
+            market_id="market-repeat",
+            token_id="token-repeat",
+            outcome="Yes",
+            side="buy",
+            price_cents=56.0,
+            size_usd=11.0,
+            traded_at=now - timedelta(seconds=45),
+            market_slug="repeat-market",
+            market_category="Politics",
+        ),
+    ]
+
+    intents = TradeMonitor._signals_to_intents(
+        wallet,
+        signals,
+        set(),
+        cooldown_markets=set(),
+        cooldown_tokens=set(),
+        recent_buy_locks=set(),
+        sellable_positions={},
+        price_filter_enabled=False,
+        short_term_enabled=True,
+    )
+
+    assert [intent.external_trade_id for intent in intents] == ["repeat-buy-1"]
+
+
 def test_fast_trade_scan_prioritizes_hot_wallets_each_cycle() -> None:
     async def _case(session: AsyncSession) -> None:
         client = _HotLanePolymarketClient()

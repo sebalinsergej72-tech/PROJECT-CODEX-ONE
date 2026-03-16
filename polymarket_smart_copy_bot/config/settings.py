@@ -110,6 +110,10 @@ class Settings(BaseSettings):
         default=15,
         alias="LOW_LIQUIDITY_MARKET_COOLDOWN_MINUTES",
     )
+    repeat_buy_cooldown_seconds: int = Field(
+        default=120,
+        alias="REPEAT_BUY_COOLDOWN_SECONDS",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")

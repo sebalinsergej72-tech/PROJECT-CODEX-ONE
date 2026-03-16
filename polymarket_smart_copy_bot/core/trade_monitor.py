@@ -103,6 +103,7 @@ class TradeMonitor:
         )
         existing_ids = await self._fetch_existing_trade_ids(session)
         cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
+        recent_buy_locks = await self._fetch_recent_buy_locks(session)
         sellable_positions = await self._fetch_local_sellable_positions(session)
         intents: list[TradeIntent] = []
         trade_tasks = [
@@ -129,6 +130,7 @@ class TradeMonitor:
                 existing_ids,
                 cooldown_markets=cooldown_markets,
                 cooldown_tokens=cooldown_tokens,
+                recent_buy_locks=recent_buy_locks,
                 sellable_positions=sellable_positions,
                 price_filter_enabled=self._price_filter_provider(),
                 short_term_enabled=self._short_term_provider(),
@@ -368,6 +370,32 @@ class TradeMonitor:
         return cooldown_markets, cooldown_tokens
 
     @staticmethod
+    async def _fetch_recent_buy_locks(session: AsyncSession) -> set[str]:
+        cooldown_seconds = max(0, settings.repeat_buy_cooldown_seconds)
+        if cooldown_seconds <= 0:
+            return set()
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=cooldown_seconds)
+        query = select(CopiedTrade).where(
+            CopiedTrade.side == TradeSide.BUY.value,
+            CopiedTrade.copied_at >= cutoff,
+        )
+        rows = (await session.execute(query)).scalars().all()
+        locks: set[str] = set()
+        for trade in rows:
+            if not TradeMonitor._should_lock_repeat_buy(trade):
+                continue
+            locks.add(
+                TradeMonitor._buy_lock_key(
+                    wallet_address=trade.wallet_address,
+                    market_id=trade.market_id,
+                    token_id=trade.token_id,
+                    outcome=trade.outcome,
+                )
+            )
+        return locks
+
+    @staticmethod
     async def _fetch_local_open_positions(
         session: AsyncSession,
     ) -> dict[str, list[Position]]:
@@ -407,6 +435,7 @@ class TradeMonitor:
         *,
         cooldown_markets: set[str],
         cooldown_tokens: set[str],
+        recent_buy_locks: set[str],
         sellable_positions: dict[str, Position],
         price_filter_enabled: bool,
         short_term_enabled: bool,
@@ -424,6 +453,17 @@ class TradeMonitor:
                 cooldown_tokens=cooldown_tokens,
             ):
                 continue
+
+            buy_lock_key = ""
+            if signal.side.lower() == TradeSide.BUY.value:
+                buy_lock_key = TradeMonitor._buy_lock_key(
+                    wallet_address=signal.wallet_address,
+                    market_id=signal.market_id,
+                    token_id=signal.token_id,
+                    outcome=signal.outcome,
+                )
+                if buy_lock_key in recent_buy_locks:
+                    continue
 
             if signal.side.lower() == TradeSide.SELL.value:
                 sellable_position = TradeMonitor._matching_sellable_position(signal, sellable_positions)
@@ -461,6 +501,8 @@ class TradeMonitor:
                     market_category=signal.market_category,
                 )
             )
+            if buy_lock_key:
+                recent_buy_locks.add(buy_lock_key)
 
             if len(intents) >= TradeMonitor.MAX_INTENTS_PER_WALLET:
                 break
@@ -686,6 +728,36 @@ class TradeMonitor:
         if copied_at.tzinfo is None:
             copied_at = copied_at.replace(tzinfo=timezone.utc)
         return copied_at >= now - timedelta(minutes=cooldown_minutes)
+
+    @staticmethod
+    def _should_lock_repeat_buy(trade: CopiedTrade) -> bool:
+        if (trade.side or "").lower() != TradeSide.BUY.value:
+            return False
+        status = (trade.status or "").lower()
+        if status in {
+            TradeStatus.SUBMITTED.value,
+            TradeStatus.PARTIAL.value,
+            TradeStatus.FILLED.value,
+        }:
+            return True
+        if trade.order_id:
+            return True
+        return float(trade.filled_size_usd or 0.0) > 0 or float(trade.filled_quantity or 0.0) > 0
+
+    @staticmethod
+    def _buy_lock_key(
+        *,
+        wallet_address: str,
+        market_id: str,
+        token_id: str | None,
+        outcome: str,
+    ) -> str:
+        return (
+            f"{wallet_address.strip().lower()}|"
+            f"{market_id.strip().lower()}|"
+            f"{(token_id or '').strip().lower()}|"
+            f"{outcome.strip().lower()}"
+        )
 
     @staticmethod
     def _matching_sellable_position(
