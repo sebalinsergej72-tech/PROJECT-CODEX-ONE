@@ -24,7 +24,15 @@ const Index = () => {
   const { data: trades, isLoading: tradesLoading } = useBotTrades();
   const { data: positions, isLoading: positionsLoading } = useBotPositions();
   const { data: openOrders, isLoading: openOrdersLoading } = useBotOpenOrders();
-  const lastUpdate = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : "—";
+  const lastUpdate = dataUpdatedAt
+    ? new Date(dataUpdatedAt).toLocaleString([], {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : "—";
 
   return (
     <div className="min-h-screen bg-background">

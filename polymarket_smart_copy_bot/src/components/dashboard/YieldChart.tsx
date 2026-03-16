@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Brush, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { usePortfolioHistory } from "@/hooks/useBotData";
 
 export function YieldChart() {
@@ -17,9 +17,21 @@ export function YieldChart() {
             const date = new Date(snap.taken_at);
             return {
                 timestamp: date.getTime(),
-                axisLabel: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
-                timeLabel: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                dateLabel: date.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+                shortLabel: date.toLocaleString([], {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
+                dateLabel: date.toLocaleDateString([], {
+                    weekday: "short",
+                    month: "short",
+                    day: "numeric",
+                }),
+                timeLabel: date.toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                }),
                 equity: snap.total_equity_usd,
             };
         });
@@ -44,6 +56,15 @@ export function YieldChart() {
     const minEquity = Math.min(...chartData.map(d => d.equity));
     const maxEquity = Math.max(...chartData.map(d => d.equity));
     const buffer = (maxEquity - minEquity) * 0.1 || maxEquity * 0.05;
+    const timeSpanMs = chartData[chartData.length - 1].timestamp - chartData[0].timestamp;
+
+    const formatAxisTick = (value: number) => {
+        const date = new Date(value);
+        if (timeSpanMs > 3 * 24 * 60 * 60 * 1000) {
+            return date.toLocaleDateString([], { month: "short", day: "numeric" });
+        }
+        return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    };
 
     return (
         <div className="rounded-xl border border-border bg-card/50 p-6 flex flex-col gap-4">
@@ -70,11 +91,15 @@ export function YieldChart() {
                             </linearGradient>
                         </defs>
                         <XAxis
-                            dataKey="axisLabel"
+                            dataKey="timestamp"
+                            type="number"
+                            scale="time"
+                            domain={["dataMin", "dataMax"]}
                             axisLine={false}
                             tickLine={false}
-                            tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }}
-                            minTickGap={24}
+                            tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+                            minTickGap={36}
+                            tickFormatter={formatAxisTick}
                         />
                         <YAxis
                             domain={[minEquity - buffer, maxEquity + buffer]}
@@ -109,6 +134,14 @@ export function YieldChart() {
                             fillOpacity={1}
                             fill="url(#colorEquity)"
                             animationDuration={1500}
+                        />
+                        <Brush
+                            dataKey="timestamp"
+                            height={26}
+                            travellerWidth={10}
+                            stroke="hsl(var(--primary))"
+                            fill="hsl(var(--secondary) / 0.35)"
+                            tickFormatter={formatAxisTick}
                         />
                     </AreaChart>
                 </ResponsiveContainer>

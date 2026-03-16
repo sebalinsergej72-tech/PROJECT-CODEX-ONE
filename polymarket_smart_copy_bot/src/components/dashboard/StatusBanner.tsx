@@ -37,6 +37,20 @@ export function StatusBanner({ status, isLoading, isError }: Props) {
     );
   }
 
+  const formatLocalDateTime = (value: string | null) => {
+    if (!value) return "n/a";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString([], {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  };
+
   const { scheduler_running, trading_enabled, dry_run, last_trade_scan_at } = status;
   let variant: "good" | "warn" | "bad" = "bad";
   let title = "";
@@ -58,7 +72,7 @@ export function StatusBanner({ status, isLoading, isError }: Props) {
   } else {
     variant = "good";
     title = dry_run ? "БОТ РАБОТАЕТ • PAPER MODE" : "БОТ РАБОТАЕТ • LIVE MODE";
-    subtitle = `Скан кошельков активен. Последний scan: ${last_trade_scan_at || "n/a"}`;
+    subtitle = `Скан кошельков активен. Последний scan: ${formatLocalDateTime(last_trade_scan_at)}`;
   }
 
   const glowClass =
