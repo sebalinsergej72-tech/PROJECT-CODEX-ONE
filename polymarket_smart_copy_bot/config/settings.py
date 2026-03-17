@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     # SAFETY: IOC + controlled slippage — fill mode settings
     fill_mode: FillMode = Field(default="conservative", alias="FILL_MODE")
     aggressive_fill_type: str = Field(default="IOC", alias="AGGRESSIVE_FILL_TYPE")            # IOC or FOK
-    max_slippage_bps: float = Field(default=100.0, alias="MAX_SLIPPAGE_BPS")                  # +1.00% default
-    max_allowed_slippage_bps: float = Field(default=100.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")  # hard cap 1.00%
+    max_slippage_bps: float = Field(default=150.0, alias="MAX_SLIPPAGE_BPS")                  # +1.50% default
+    max_allowed_slippage_bps: float = Field(default=150.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")  # hard cap 1.50%
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")  # 2 minutes
     aggressive_reprice_delay_seconds: int = Field(
         default=25,
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     )
     min_valid_price: float = Field(default=0.01, alias="MIN_VALID_PRICE")
     max_valid_price: float = Field(default=0.99, alias="MAX_VALID_PRICE")
-    min_orderbook_liquidity_usd: float = Field(default=15.0, alias="MIN_ORDERBOOK_LIQUIDITY_USD")
-    liquidity_buffer_multiplier: float = Field(default=1.5, alias="LIQUIDITY_BUFFER_MULTIPLIER")
+    min_orderbook_liquidity_usd: float = Field(default=10.0, alias="MIN_ORDERBOOK_LIQUIDITY_USD")
+    liquidity_buffer_multiplier: float = Field(default=1.25, alias="LIQUIDITY_BUFFER_MULTIPLIER")
     max_price_deviation_pct: float = Field(default=0.08, alias="MAX_PRICE_DEVIATION_PCT")
     min_absolute_price_deviation_cents: float = Field(
         default=2.0,
@@ -156,8 +156,8 @@ class Settings(BaseSettings):
         alias="ENABLE_DRAWDOWN_GUARDS",
     )
     # SAFETY: safe aggressive fill
-    max_slippage_bps: float = Field(default=100.0, alias="MAX_SLIPPAGE_BPS")
-    max_allowed_slippage_bps: float = Field(default=100.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
+    max_slippage_bps: float = Field(default=150.0, alias="MAX_SLIPPAGE_BPS")
+    max_allowed_slippage_bps: float = Field(default=150.0, alias="MAX_ALLOWED_SLIPPAGE_BPS")
     aggressive_fill_ttl_seconds: int = Field(default=120, alias="AGGRESSIVE_FILL_TTL_SECONDS")
 
     wallet_score_refresh_hours: int = Field(default=4, alias="WALLET_SCORE_REFRESH_HOURS")

@@ -510,7 +510,7 @@ def test_execute_copy_trade_skips_on_low_liquidity() -> None:
 
         row = (await session.execute(select(CopiedTrade))).scalar_one()
         assert row.status == TradeStatus.SKIPPED.value
-        assert row.reason == "low_liquidity:1.20<15.00"
+        assert row.reason == "low_liquidity:1.20<10.00"
 
     asyncio.run(_run_with_session(_case))
 
