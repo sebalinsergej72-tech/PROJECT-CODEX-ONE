@@ -660,6 +660,8 @@ class TradeMonitor:
             price_cents = local.current_price_cents if local.current_price_cents > 0 else local.avg_price_cents
             if price_cents <= 0:
                 continue
+            if cls._is_reconcile_position_residual_too_small(local, price_cents=price_cents):
+                continue
 
             external_trade_id = (
                 f"reconcile_close:{wallet_address}:{local.id}:{int(now.timestamp() // 300)}"
@@ -776,6 +778,12 @@ class TradeMonitor:
             requested_size_usd = available_size_usd
         trimmed = min(available_size_usd, requested_size_usd)
         return trimmed < settings.min_trade_size_usd
+
+    @staticmethod
+    def _is_reconcile_position_residual_too_small(position: Position, *, price_cents: float) -> bool:
+        execution_price = max(price_cents / 100.0, settings.min_valid_price)
+        available_size_usd = max(position.quantity, 0.0) * execution_price
+        return available_size_usd < settings.min_trade_size_usd
 
     @classmethod
     def _is_market_tradeable(cls, *, signal: WalletTradeSignal, is_short_term: bool) -> bool:

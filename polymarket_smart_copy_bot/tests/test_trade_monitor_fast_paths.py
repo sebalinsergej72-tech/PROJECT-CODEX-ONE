@@ -777,6 +777,55 @@ def test_reconcile_scan_fetches_positions_without_trade_fetch() -> None:
     asyncio.run(_run_with_session(_case))
 
 
+def test_reconcile_scan_skips_dust_residual_positions() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x2222222222222222222222222222222222222222"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="reconcile-dust",
+                score=150.0,
+                win_rate=0.75,
+                trades_90d=180,
+                profit_factor=2.2,
+                avg_size=1500.0,
+                niche="overall,sports",
+                enabled=True,
+            )
+        )
+        session.add(
+            Position(
+                wallet_address=wallet_address,
+                market_id="market-dust",
+                token_id="token-dust",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                quantity=0.01,
+                avg_price_cents=50.0,
+                current_price_cents=52.0,
+                invested_usd=0.01,
+                is_open=True,
+                opened_at=utc_now() - timedelta(minutes=10),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_reconcile_intents(session)
+
+        assert intents == []
+        assert client.trade_calls == 0
+        assert client.position_calls == 1
+
+    asyncio.run(_run_with_session(_case))
+
+
 def test_trade_monitor_scan_does_not_sync_account_positions() -> None:
     class _DummyRiskManager:
         def should_trigger_drawdown_stop(self, portfolio, risk_mode) -> bool:
