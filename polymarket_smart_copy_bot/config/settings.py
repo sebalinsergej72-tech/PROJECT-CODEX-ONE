@@ -72,6 +72,23 @@ class Settings(BaseSettings):
         default=2.0,
         alias="POLYMARKET_MARKET_WS_RECONNECT_SECONDS",
     )
+    execution_sidecar_enabled: bool = Field(default=False, alias="EXECUTION_SIDECAR_ENABLED")
+    execution_sidecar_base_url: str = Field(
+        default="http://127.0.0.1:8787",
+        alias="EXECUTION_SIDECAR_BASE_URL",
+    )
+    execution_sidecar_timeout_seconds: float = Field(
+        default=0.75,
+        alias="EXECUTION_SIDECAR_TIMEOUT_SECONDS",
+    )
+    execution_sidecar_market_data_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_MARKET_DATA_ENABLED",
+    )
+    execution_sidecar_execution_plan_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_SIDECAR_EXECUTION_PLAN_ENABLED",
+    )
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
 

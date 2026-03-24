@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from config.settings import settings
 from data.polymarket_client import PolymarketClient
 
 
@@ -74,3 +75,70 @@ def test_fetch_orderbook_prefers_fresh_market_ws_snapshot() -> None:
     assert snapshot is not None
     assert snapshot.best_bid == 0.55
     assert snapshot.best_ask == 0.57
+
+
+def test_fetch_orderbook_uses_execution_sidecar_before_rest(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "execution_sidecar_enabled", True)
+    monkeypatch.setattr(settings, "execution_sidecar_market_data_enabled", True)
+    client = PolymarketClient()
+
+    class FakeSidecar:
+        async def fetch_orderbook(self, token_id: str):
+            assert token_id == "token-sidecar"
+            return PolymarketClient._parse_orderbook_snapshot(
+                {
+                    "bids": [{"price": "0.60", "size": "6"}],
+                    "asks": [{"price": "0.62", "size": "9"}],
+                }
+            )
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    client._execution_sidecar = FakeSidecar()
+
+    async def _boom(*_: Any, **__: Any) -> Any:
+        raise AssertionError("REST fallback should not be used when sidecar returns a snapshot")
+
+    client._request_json = _boom  # type: ignore[method-assign]
+
+    snapshot = asyncio.run(client.fetch_orderbook("token-sidecar"))
+    assert snapshot is not None
+    assert snapshot.best_bid == 0.60
+    assert snapshot.best_ask == 0.62
+
+
+def test_prime_market_data_backfills_local_cache_from_execution_sidecar(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "execution_sidecar_enabled", True)
+    monkeypatch.setattr(settings, "execution_sidecar_market_data_enabled", True)
+    monkeypatch.setattr(settings, "polymarket_market_ws_enabled", False)
+    client = PolymarketClient()
+
+    class FakeSidecar:
+        async def prime_market_data(self, token_ids: list[str]):
+            assert token_ids == ["token-a"]
+            return {
+                "token-a": PolymarketClient._parse_orderbook_snapshot(
+                    {
+                        "bids": [{"price": "0.21", "size": "3"}],
+                        "asks": [{"price": "0.24", "size": "7"}],
+                    }
+                )
+            }
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    client._execution_sidecar = FakeSidecar()
+
+    asyncio.run(client.prime_market_data(["token-a"]))
+    snapshot = client.get_cached_orderbook("token-a")
+    assert snapshot is not None
+    assert snapshot.best_bid == 0.21
+    assert snapshot.best_ask == 0.24

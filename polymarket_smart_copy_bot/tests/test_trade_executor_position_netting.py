@@ -11,6 +11,7 @@ from core.trade_executor import TradeExecutor
 from core.risk_manager import PortfolioState, RiskDecision
 from core.trade_monitor import TradeIntent
 from config.settings import settings
+from contracts.execution_sidecar import SidecarExecutionPlanResponse, SidecarOrderRequest
 from data.polymarket_client import OrderbookLevel, OrderbookSnapshot
 from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 
@@ -210,6 +211,103 @@ def test_build_execution_plan_keeps_fak_for_aggressive_sell() -> None:
     assert plan is not None
     assert plan.order_type == "FAK"
     assert plan.order_request.order_type == "FAK"
+
+
+def test_plan_execution_uses_sidecar_prechecks_and_plan() -> None:
+    class _DummyPolymarketClient:
+        async def build_execution_plan_via_sidecar(self, request):
+            assert request.orderbook is not None
+            return SidecarExecutionPlanResponse(
+                allowed=True,
+                requested_price_cents=60.6,
+                requested_slippage_bps=100.0,
+                order_type="GTC",
+                echoed_order=SidecarOrderRequest(
+                    token_id="tok-1",
+                    side="buy",
+                    price_cents=60.6,
+                    size_usd=7.0,
+                    market_id="mkt-1",
+                    outcome="Yes",
+                    order_type="GTC",
+                ),
+            )
+
+    class _DummyRiskManager:
+        def can_accept_slippage(self, **kwargs):
+            raise AssertionError("local slippage guard should not run when sidecar plan is used")
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case() -> None:
+        original_sidecar = settings.execution_sidecar_enabled
+        original_plan = settings.execution_sidecar_execution_plan_enabled
+        try:
+            settings.execution_sidecar_enabled = True
+            settings.execution_sidecar_execution_plan_enabled = True
+            executor = TradeExecutor(_DummyPolymarketClient(), _DummyRiskManager(), object(), _DummyPortfolioTracker())
+            outcome = await executor._plan_execution(
+                intent=_intent(side="buy", price_cents=60.0, size_usd=7.0),
+                target_size_usd=7.0,
+                risk_mode="aggressive",
+                orderbook=OrderbookSnapshot(
+                    bids=[OrderbookLevel(price=0.59, size=100.0)],
+                    asks=[OrderbookLevel(price=0.60, size=100.0)],
+                    best_bid=0.59,
+                    best_ask=0.60,
+                ),
+            )
+            assert outcome.reason is None
+            assert outcome.plan is not None
+            assert outcome.plan.requested_price_cents == pytest.approx(60.6, rel=1e-6)
+            assert outcome.plan.requested_slippage_bps == pytest.approx(100.0, rel=1e-6)
+            assert outcome.plan.order_type == "GTC"
+        finally:
+            settings.execution_sidecar_enabled = original_sidecar
+            settings.execution_sidecar_execution_plan_enabled = original_plan
+
+    asyncio.run(_case())
+
+
+def test_plan_execution_falls_back_to_python_when_sidecar_unavailable() -> None:
+    class _DummyPolymarketClient:
+        async def build_execution_plan_via_sidecar(self, request):
+            return None
+
+    class _DummyRiskManager:
+        def can_accept_slippage(self, **kwargs):
+            return True, 5.0
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case() -> None:
+        original_sidecar = settings.execution_sidecar_enabled
+        original_plan = settings.execution_sidecar_execution_plan_enabled
+        try:
+            settings.execution_sidecar_enabled = True
+            settings.execution_sidecar_execution_plan_enabled = True
+            executor = TradeExecutor(_DummyPolymarketClient(), _DummyRiskManager(), object(), _DummyPortfolioTracker())
+            outcome = await executor._plan_execution(
+                intent=_intent(side="buy", price_cents=60.0, size_usd=7.0),
+                target_size_usd=7.0,
+                risk_mode="aggressive",
+                orderbook=OrderbookSnapshot(
+                    bids=[OrderbookLevel(price=0.59, size=100.0)],
+                    asks=[OrderbookLevel(price=0.60, size=100.0)],
+                    best_bid=0.59,
+                    best_ask=0.60,
+                ),
+            )
+            assert outcome.reason is None
+            assert outcome.plan is not None
+            assert outcome.plan.requested_slippage_bps == pytest.approx(5.0, rel=1e-6)
+        finally:
+            settings.execution_sidecar_enabled = original_sidecar
+            settings.execution_sidecar_execution_plan_enabled = original_plan
+
+    asyncio.run(_case())
 
 
 def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:

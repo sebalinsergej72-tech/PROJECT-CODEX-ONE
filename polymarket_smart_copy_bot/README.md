@@ -53,6 +53,21 @@ Run local API too:
 python main.py --with-api --port 8000
 ```
 
+Optional Rust execution sidecar:
+
+```bash
+make polymarket-sidecar
+```
+
+Then enable it in `.env`:
+
+```bash
+EXECUTION_SIDECAR_ENABLED=true
+EXECUTION_SIDECAR_BASE_URL=http://127.0.0.1:8787
+EXECUTION_SIDECAR_MARKET_DATA_ENABLED=true
+EXECUTION_SIDECAR_EXECUTION_PLAN_ENABLED=true
+```
+
 ## Required Environment Variables
 
 - `DATABASE_URL` (Railway Postgres URL; if omitted, local SQLite is used)
@@ -189,3 +204,4 @@ pytest -q
 - Keep secrets only in Railway Variables, never in repository.
 - For live execution ensure token-level data mapping (`token_id`) is correct for markets being copied.
 - Validate dry-run behavior before switching to live mode.
+- The Rust sidecar is optional and currently used as a migration path for low-latency market-data and execution-plane logic. Python remains the primary control plane and fallback path.

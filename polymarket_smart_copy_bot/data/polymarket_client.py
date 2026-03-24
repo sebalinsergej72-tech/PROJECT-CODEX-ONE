@@ -136,6 +136,11 @@ class PolymarketClient:
         self._market_ws_waiters: dict[str, asyncio.Event] = {}
         self._market_ws_lock = asyncio.Lock()
         self._market_ws_send_lock = asyncio.Lock()
+        self._execution_sidecar: Any | None = None
+        if settings.execution_sidecar_enabled:
+            from data.execution_sidecar_client import ExecutionSidecarClient
+
+            self._execution_sidecar = ExecutionSidecarClient()
 
     def set_dry_run(self, enabled: bool) -> None:
         self._dry_run = enabled
@@ -159,6 +164,8 @@ class PolymarketClient:
                 self._run_market_ws_loop(),
                 name="polymarket-market-ws",
             )
+        if self._execution_sidecar is not None:
+            await self._execution_sidecar.start()
 
     async def stop(self) -> None:
         self._market_ws_stop.set()
@@ -180,6 +187,8 @@ class PolymarketClient:
         if self._session is not None:
             await self._session.close()
             self._session = None
+        if self._execution_sidecar is not None:
+            await self._execution_sidecar.stop()
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -447,6 +456,16 @@ class PolymarketClient:
         if cached is not None:
             return cached
 
+        if settings.execution_sidecar_enabled and settings.execution_sidecar_market_data_enabled and self._execution_sidecar is not None:
+            try:
+                snapshot = await self._execution_sidecar.fetch_orderbook(normalized_token)
+            except Exception as exc:
+                logger.debug("Execution sidecar orderbook fetch failed for {}: {}", normalized_token, exc)
+            else:
+                if snapshot is not None:
+                    self._store_market_ws_snapshot(normalized_token, snapshot)
+                    return snapshot
+
         if settings.polymarket_market_ws_enabled:
             await self.prime_market_data([normalized_token])
             cached = await self._wait_for_market_ws_snapshot(
@@ -481,14 +500,29 @@ class PolymarketClient:
         return self._get_market_ws_snapshot(normalized_token)
 
     async def prime_market_data(self, token_ids: list[str | None]) -> None:
-        if not settings.polymarket_market_ws_enabled:
-            return
         normalized = {
             str(token_id).strip()
             for token_id in token_ids
             if str(token_id or "").strip() and str(token_id).strip() not in self._missing_orderbooks
         }
         if not normalized:
+            return
+        if settings.execution_sidecar_enabled and settings.execution_sidecar_market_data_enabled and self._execution_sidecar is not None:
+            try:
+                snapshots = await self._execution_sidecar.prime_market_data(sorted(normalized))
+            except Exception as exc:
+                logger.debug("Execution sidecar market prime failed: {}", exc)
+            else:
+                for token_id, snapshot in snapshots.items():
+                    if snapshot is not None:
+                        self._store_market_ws_snapshot(token_id, snapshot)
+                missing = [token_id for token_id, snapshot in snapshots.items() if snapshot is None]
+                for token_id in missing:
+                    self._missing_orderbooks.add(token_id)
+                # If every requested token already has a snapshot, do not do extra Python-side priming.
+                if snapshots and all(token_id in snapshots and snapshots[token_id] is not None for token_id in normalized):
+                    return
+        if not settings.polymarket_market_ws_enabled:
             return
         async with self._market_ws_lock:
             newly_desired = normalized - self._market_ws_desired_assets
@@ -499,6 +533,19 @@ class PolymarketClient:
                 self._market_ws_waiters.setdefault(token_id, asyncio.Event())
             self._market_ws_wakeup.set()
         await self._send_market_ws_subscription(sorted(newly_desired))
+
+    async def build_execution_plan_via_sidecar(self, request: Any) -> Any | None:
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_execution_plan_enabled
+            and self._execution_sidecar is not None
+        ):
+            return None
+        try:
+            return await self._execution_sidecar.build_execution_plan(request)
+        except Exception as exc:
+            logger.debug("Execution sidecar plan build failed for {}: {}", request.external_trade_id, exc)
+            return None
 
     async def _run_market_ws_loop(self) -> None:
         while not self._market_ws_stop.is_set():

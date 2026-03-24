@@ -9,6 +9,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import FillMode, RiskMode, settings
+from contracts.execution_sidecar import (
+    SidecarExecutionPlanRequest,
+    SidecarExecutionPlanResponse,
+    SidecarOrderRequest,
+    SidecarOrderbookLevel,
+    SidecarOrderbookSnapshot,
+)
 from core.portfolio_tracker import PortfolioTracker
 from core.risk_manager import PortfolioState, RiskManager
 from core.trade_monitor import TradeIntent
@@ -43,6 +50,12 @@ class ExecutionPlan:
     requested_price_cents: float
     requested_slippage_bps: float
     order_type: str
+
+
+@dataclass(slots=True)
+class ExecutionPlanningOutcome:
+    plan: ExecutionPlan | None
+    reason: str | None = None
 
 
 class TradeExecutor:
@@ -250,32 +263,23 @@ class TradeExecutor:
         orderbook = intent.market_snapshot
         if orderbook is None:
             orderbook = await self.polymarket_client.fetch_orderbook(intent.token_id)
-        tradable, tradability_reason = self._check_market_tradability(
-            intent=intent,
-            orderbook=orderbook,
-            target_size_usd=target_size_usd,
-        )
-        if not tradable:
-            copied_trade.status = TradeStatus.SKIPPED.value
-            copied_trade.reason = tradability_reason
-            self._stage_copied_trade(session, copied_trade)
-            logger.info("Trade {} skipped: {}", intent.external_trade_id, tradability_reason)
-            return copied_trade.status
 
         # Persist the bot-calculated intended size even if execution later fails.
         copied_trade.size_usd = target_size_usd
 
-        execution_plan = self._build_execution_plan(
+        planning_outcome = await self._plan_execution(
             intent=intent,
             target_size_usd=target_size_usd,
             risk_mode=risk_mode,
+            orderbook=orderbook,
         )
-        if execution_plan is None:
+        if planning_outcome.plan is None:
             copied_trade.status = TradeStatus.SKIPPED.value
-            copied_trade.reason = "slippage_above_hard_limit"
+            copied_trade.reason = planning_outcome.reason or "execution_plan_rejected"
             self._stage_copied_trade(session, copied_trade)
-            logger.warning("Trade {} skipped: slippage_above_hard_limit", intent.external_trade_id)
+            logger.info("Trade {} skipped: {}", intent.external_trade_id, copied_trade.reason)
             return copied_trade.status
+        execution_plan = planning_outcome.plan
 
         result = await self.polymarket_client.place_order(
             execution_plan.order_request
@@ -523,6 +527,124 @@ class TradeExecutor:
         if live_balance is None or live_balance < 0:
             return
         await self.portfolio_tracker.update_capital_base(session, live_balance)
+
+    async def _plan_execution(
+        self,
+        *,
+        intent: TradeIntent,
+        target_size_usd: float,
+        risk_mode: RiskMode,
+        orderbook: OrderbookSnapshot | None,
+    ) -> ExecutionPlanningOutcome:
+        sidecar_plan = await self._build_execution_plan_via_sidecar(
+            intent=intent,
+            target_size_usd=target_size_usd,
+            risk_mode=risk_mode,
+            orderbook=orderbook,
+        )
+        if sidecar_plan is not None:
+            if not sidecar_plan.allowed:
+                return ExecutionPlanningOutcome(plan=None, reason=sidecar_plan.reason or "execution_plan_rejected")
+            converted = self._execution_plan_from_sidecar_response(sidecar_plan)
+            if converted is not None:
+                return ExecutionPlanningOutcome(plan=converted)
+            logger.warning(
+                "Execution sidecar returned incomplete plan for {}, falling back to Python path",
+                intent.external_trade_id,
+            )
+
+        tradable, tradability_reason = self._check_market_tradability(
+            intent=intent,
+            orderbook=orderbook,
+            target_size_usd=target_size_usd,
+        )
+        if not tradable:
+            return ExecutionPlanningOutcome(plan=None, reason=tradability_reason)
+
+        execution_plan = self._build_execution_plan(
+            intent=intent,
+            target_size_usd=target_size_usd,
+            risk_mode=risk_mode,
+        )
+        if execution_plan is None:
+            return ExecutionPlanningOutcome(plan=None, reason="slippage_above_hard_limit")
+        return ExecutionPlanningOutcome(plan=execution_plan)
+
+    async def _build_execution_plan_via_sidecar(
+        self,
+        *,
+        intent: TradeIntent,
+        target_size_usd: float,
+        risk_mode: RiskMode,
+        orderbook: OrderbookSnapshot | None,
+    ) -> SidecarExecutionPlanResponse | None:
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_execution_plan_enabled
+        ):
+            return None
+        request = SidecarExecutionPlanRequest(
+            external_trade_id=intent.external_trade_id,
+            source_price_cents=float(intent.source_price_cents),
+            target_size_usd=float(target_size_usd),
+            risk_mode=risk_mode,
+            max_slippage_bps=float(settings.max_slippage_bps),
+            max_allowed_slippage_bps=float(settings.max_allowed_slippage_bps),
+            min_valid_price=float(settings.min_valid_price),
+            min_orderbook_liquidity_usd=float(settings.min_orderbook_liquidity_usd),
+            liquidity_buffer_multiplier=float(settings.liquidity_buffer_multiplier),
+            max_price_deviation_pct=float(settings.max_price_deviation_pct),
+            min_absolute_price_deviation_cents=float(settings.min_absolute_price_deviation_cents),
+            orderbook=self._sidecar_orderbook_snapshot(orderbook),
+            order=SidecarOrderRequest(
+                token_id=intent.token_id or "",
+                side=intent.side,
+                price_cents=float(intent.source_price_cents),
+                size_usd=float(target_size_usd),
+                market_id=intent.market_id,
+                outcome=intent.outcome,
+                order_type="GTC",
+            ),
+        )
+        return await self.polymarket_client.build_execution_plan_via_sidecar(request)
+
+    @staticmethod
+    def _execution_plan_from_sidecar_response(
+        response: SidecarExecutionPlanResponse,
+    ) -> ExecutionPlan | None:
+        echoed = response.echoed_order
+        if (
+            echoed is None
+            or response.requested_price_cents is None
+            or response.requested_slippage_bps is None
+            or response.order_type is None
+        ):
+            return None
+        return ExecutionPlan(
+            order_request=OrderRequest(
+                token_id=echoed.token_id,
+                side=echoed.side,
+                price_cents=echoed.price_cents,
+                size_usd=echoed.size_usd,
+                market_id=echoed.market_id,
+                outcome=echoed.outcome,
+                order_type=echoed.order_type,
+            ),
+            requested_price_cents=response.requested_price_cents,
+            requested_slippage_bps=response.requested_slippage_bps,
+            order_type=response.order_type,
+        )
+
+    @staticmethod
+    def _sidecar_orderbook_snapshot(orderbook: OrderbookSnapshot | None) -> SidecarOrderbookSnapshot | None:
+        if orderbook is None:
+            return None
+        return SidecarOrderbookSnapshot(
+            bids=[SidecarOrderbookLevel(price=level.price, size=level.size) for level in orderbook.bids],
+            asks=[SidecarOrderbookLevel(price=level.price, size=level.size) for level in orderbook.asks],
+            best_bid=orderbook.best_bid,
+            best_ask=orderbook.best_ask,
+        )
 
     def _build_execution_plan(
         self,
