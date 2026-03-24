@@ -31,6 +31,7 @@ Current endpoints:
 - `GET /v1/market/snapshot/:token_id`
 - `POST /v1/market/prime`
 - `POST /v1/execute/plan`
+- `POST /v1/fills/reconcile`
 
 Current responsibilities:
 
@@ -38,6 +39,7 @@ Current responsibilities:
 - cache snapshots in memory with a short TTL
 - run hot-path tradability checks (`no_orderbook`, `low_liquidity`, `price_moved`)
 - build aggressive execution plans using the same slippage rules as Python
+- reconcile fill lifecycle state from normalized fill rows plus `order_open`
 
 ### Python integration
 
@@ -48,12 +50,14 @@ Current responsibilities:
 - `EXECUTION_SIDECAR_TIMEOUT_SECONDS`
 - `EXECUTION_SIDECAR_MARKET_DATA_ENABLED`
 - `EXECUTION_SIDECAR_EXECUTION_PLAN_ENABLED`
+- `EXECUTION_SIDECAR_FILL_RECONCILE_ENABLED`
 
 When enabled:
 
 - `fetch_orderbook()` tries the Rust sidecar before local REST fallback
 - `prime_market_data()` can backfill the local Python snapshot cache from the Rust sidecar
 - `TradeExecutor` can ask the Rust sidecar to evaluate tradability and build an execution plan before falling back to Python
+- `TradeExecutor` can ask the Rust sidecar to compute fill reconciliation status before falling back to Python
 
 ## What is still intentionally left in Python
 
@@ -78,7 +82,7 @@ This lets us migrate the latency-critical path without rewriting the whole bot a
 
 ## Next suggested implementation steps
 
-1. Add fill-monitor endpoints into Rust.
+1. Move authenticated order/fill reads into Rust after auth/signing parity is available.
 2. Move hot-wallet polling into Rust.
 3. Add shadow-mode comparison metrics between Python and Rust decisions.
 4. Move actual signed order submission after parity checks.

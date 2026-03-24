@@ -11,8 +11,12 @@ from core.trade_executor import TradeExecutor
 from core.risk_manager import PortfolioState, RiskDecision
 from core.trade_monitor import TradeIntent
 from config.settings import settings
-from contracts.execution_sidecar import SidecarExecutionPlanResponse, SidecarOrderRequest
-from data.polymarket_client import OrderbookLevel, OrderbookSnapshot
+from contracts.execution_sidecar import (
+    SidecarExecutionPlanResponse,
+    SidecarFillReconcileResponse,
+    SidecarOrderRequest,
+)
+from data.polymarket_client import FillInfo, OrderbookLevel, OrderbookSnapshot
 from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
 
 
@@ -883,3 +887,100 @@ def test_maybe_reprice_submitted_gtc_buy_replaces_order_once() -> None:
     assert client.placed_requests[0].price_cents == pytest.approx(expected_price, rel=1e-6)
     assert copied_trade.order_id == "ord-2"
     assert "repriced_once" in (copied_trade.reason or "")
+
+
+def test_reconcile_trade_fill_state_uses_sidecar_response() -> None:
+    class _DummyPolymarketClient:
+        async def fetch_account_fills(self, **kwargs):
+            return [
+                FillInfo(
+                    trade_id="fill-1",
+                    order_id="ord-1",
+                    market_id="mkt-1",
+                    token_id="tok-1",
+                    side="buy",
+                    price_cents=70.0,
+                    size_shares=10.0,
+                    size_usd=7.0,
+                    traded_at=datetime(2026, 3, 24, 12, 0, tzinfo=timezone.utc),
+                    raw={},
+                )
+            ]
+
+        async def is_order_open(self, order_id: str):
+            return False
+
+        async def reconcile_fills_via_sidecar(self, request):
+            assert len(request.fills) == 1
+            return SidecarFillReconcileResponse(
+                status="filled",
+                reason="filled @ 70.00c",
+                total_quantity=10.0,
+                total_size_usd=7.0,
+                filled_price_cents=70.0,
+                delta_quantity=10.0,
+                delta_size_usd=7.0,
+                delta_price_cents=70.0,
+                latest_fill_ts=datetime(2026, 3, 24, 12, 0, tzinfo=timezone.utc).timestamp(),
+                order_open=False,
+            )
+
+        def is_dry_run(self) -> bool:
+            return False
+
+    class _DummyRiskManager:
+        @staticmethod
+        def compute_slippage_bps(**kwargs):
+            return 0.0
+
+    class _DummyNotifications:
+        async def send_message(self, text: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        original_sidecar = settings.execution_sidecar_enabled
+        original_reconcile = settings.execution_sidecar_fill_reconcile_enabled
+        try:
+            settings.execution_sidecar_enabled = True
+            settings.execution_sidecar_fill_reconcile_enabled = True
+            executor = TradeExecutor(
+                _DummyPolymarketClient(),
+                _DummyRiskManager(),
+                _DummyNotifications(),
+                _DummyPortfolioTracker(),
+            )
+            copied_trade = CopiedTrade(
+                external_trade_id="ext-fill-1",
+                wallet_address="0xabc",
+                market_id="mkt-1",
+                token_id="tok-1",
+                outcome="Yes",
+                side="buy",
+                price_cents=60.0,
+                size_usd=7.0,
+                status=TradeStatus.SUBMITTED.value,
+                order_id="ord-1",
+                submitted_at=datetime(2026, 3, 24, 11, 59, tzinfo=timezone.utc),
+            )
+            session.add(copied_trade)
+            await session.flush()
+
+            result = await executor._reconcile_trade_fill_state(
+                session=session,
+                copied_trade=copied_trade,
+                intent=_intent(side="buy", price_cents=60.0, size_usd=7.0),
+            )
+
+            assert result.status == TradeStatus.FILLED
+            assert copied_trade.status == TradeStatus.FILLED.value
+            assert copied_trade.reason == "filled @ 70.00c"
+            assert copied_trade.filled_size_usd == pytest.approx(7.0, rel=1e-6)
+            assert copied_trade.filled_price_cents == pytest.approx(70.0, rel=1e-6)
+        finally:
+            settings.execution_sidecar_enabled = original_sidecar
+            settings.execution_sidecar_fill_reconcile_enabled = original_reconcile
+
+    asyncio.run(_run_with_session(_case))

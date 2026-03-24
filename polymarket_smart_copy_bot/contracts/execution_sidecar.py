@@ -56,3 +56,35 @@ class SidecarExecutionPlanResponse(BaseModel):
     requested_slippage_bps: float | None = None
     order_type: str | None = None
     echoed_order: SidecarOrderRequest | None = None
+
+
+class SidecarFillRow(BaseModel):
+    order_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    side: str
+    price_cents: float
+    size_shares: float
+    size_usd: float
+    traded_at_ts: float
+
+
+class SidecarFillReconcileRequest(BaseModel):
+    copied_trade_size_usd: float
+    current_filled_quantity: float
+    current_filled_size_usd: float
+    fills: list[SidecarFillRow] = Field(default_factory=list)
+    order_open: bool | None = None
+
+
+class SidecarFillReconcileResponse(BaseModel):
+    status: str
+    reason: str
+    total_quantity: float
+    total_size_usd: float
+    filled_price_cents: float
+    delta_quantity: float
+    delta_size_usd: float
+    delta_price_cents: float
+    latest_fill_ts: float | None = None
+    order_open: bool | None = None

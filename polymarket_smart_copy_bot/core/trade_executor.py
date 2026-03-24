@@ -12,6 +12,9 @@ from config.settings import FillMode, RiskMode, settings
 from contracts.execution_sidecar import (
     SidecarExecutionPlanRequest,
     SidecarExecutionPlanResponse,
+    SidecarFillReconcileRequest,
+    SidecarFillReconcileResponse,
+    SidecarFillRow,
     SidecarOrderRequest,
     SidecarOrderbookLevel,
     SidecarOrderbookSnapshot,
@@ -1064,18 +1067,49 @@ class TradeExecutor:
         if delta_quantity > 0 and delta_size_usd > 0:
             delta_price_cents = round((delta_size_usd / delta_quantity) * 100.0, 4)
 
-        if delta_quantity > 0 and delta_size_usd > 0:
-            fill_intent = self._intent_with_fill(intent, price_cents=delta_price_cents, size_usd=delta_size_usd)
-            await self._upsert_position(session, fill_intent, delta_size_usd)
-
         order_open = None
         if copied_trade.order_id:
             order_open = await self.polymarket_client.is_order_open(copied_trade.order_id)
+
+        sidecar_reconcile = await self._reconcile_fills_via_sidecar(
+            copied_trade=copied_trade,
+            fills=fills or [],
+            order_open=order_open,
+        )
+        if sidecar_reconcile is not None:
+            delta_quantity = sidecar_reconcile.delta_quantity
+            delta_size_usd = sidecar_reconcile.delta_size_usd
+            delta_price_cents = sidecar_reconcile.delta_price_cents
+            latest_fill_at = (
+                datetime.fromtimestamp(sidecar_reconcile.latest_fill_ts, tz=timezone.utc)
+                if sidecar_reconcile.latest_fill_ts is not None
+                else None
+            )
+            total_quantity = sidecar_reconcile.total_quantity
+            total_size_usd = sidecar_reconcile.total_size_usd
+
+        if delta_quantity > 0 and delta_size_usd > 0:
+            fill_intent = self._intent_with_fill(intent, price_cents=delta_price_cents, size_usd=delta_size_usd)
+            await self._upsert_position(session, fill_intent, delta_size_usd)
 
         copied_trade.filled_quantity = round(total_quantity, 8)
         copied_trade.filled_size_usd = round(total_size_usd, 4)
         copied_trade.filled_price_cents = round((total_size_usd / total_quantity) * 100.0, 4) if total_quantity > 0 else 0.0
         copied_trade.filled_at = latest_fill_at
+
+        if sidecar_reconcile is not None:
+            copied_trade.status = sidecar_reconcile.status
+            copied_trade.reason = sidecar_reconcile.reason
+            if copied_trade.status == TradeStatus.CANCELED.value:
+                copied_trade.canceled_at = datetime.now(tz=timezone.utc)
+            return FillReconcileResult(
+                status=TradeStatus(copied_trade.status),
+                newly_filled_usd=round(delta_size_usd, 4),
+                newly_filled_quantity=round(delta_quantity, 8),
+                fill_price_cents=delta_price_cents or copied_trade.filled_price_cents,
+                order_open=sidecar_reconcile.order_open,
+                latest_fill_at=latest_fill_at,
+            )
 
         size_tolerance = max(min(copied_trade.size_usd * 0.01, 0.1), 0.01)
         fully_filled = total_size_usd + size_tolerance >= copied_trade.size_usd
@@ -1115,6 +1149,39 @@ class TradeExecutor:
             order_open=order_open,
             latest_fill_at=latest_fill_at,
         )
+
+    async def _reconcile_fills_via_sidecar(
+        self,
+        *,
+        copied_trade: CopiedTrade,
+        fills: list[Any],
+        order_open: bool | None,
+    ) -> SidecarFillReconcileResponse | None:
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_fill_reconcile_enabled
+        ):
+            return None
+        request = SidecarFillReconcileRequest(
+            copied_trade_size_usd=float(copied_trade.size_usd or 0.0),
+            current_filled_quantity=float(copied_trade.filled_quantity or 0.0),
+            current_filled_size_usd=float(copied_trade.filled_size_usd or 0.0),
+            fills=[
+                SidecarFillRow(
+                    order_id=fill.order_id,
+                    market_id=fill.market_id,
+                    token_id=fill.token_id,
+                    side=fill.side,
+                    price_cents=float(fill.price_cents),
+                    size_shares=float(fill.size_shares),
+                    size_usd=float(fill.size_usd),
+                    traded_at_ts=float(fill.traded_at.timestamp()),
+                )
+                for fill in fills
+            ],
+            order_open=order_open,
+        )
+        return await self.polymarket_client.reconcile_fills_via_sidecar(request)
 
     def _build_reprice_plan(self, *, copied_trade: CopiedTrade) -> ExecutionPlan | None:
         requested_slippage_bps = max(float(settings.max_allowed_slippage_bps), 0.0)

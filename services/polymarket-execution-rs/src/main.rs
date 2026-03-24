@@ -81,6 +81,41 @@ struct ExecutionPlanResponse {
     echoed_order: Option<SidecarOrderRequest>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FillRow {
+    order_id: Option<String>,
+    market_id: Option<String>,
+    token_id: Option<String>,
+    side: String,
+    price_cents: f64,
+    size_shares: f64,
+    size_usd: f64,
+    traded_at_ts: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FillReconcileRequest {
+    copied_trade_size_usd: f64,
+    current_filled_quantity: f64,
+    current_filled_size_usd: f64,
+    fills: Vec<FillRow>,
+    order_open: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FillReconcileResponse {
+    status: String,
+    reason: String,
+    total_quantity: f64,
+    total_size_usd: f64,
+    filled_price_cents: f64,
+    delta_quantity: f64,
+    delta_size_usd: f64,
+    delta_price_cents: f64,
+    latest_fill_ts: Option<f64>,
+    order_open: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -132,6 +167,7 @@ async fn main() -> Result<()> {
         .route("/v1/market/snapshot/{token_id}", get(fetch_snapshot))
         .route("/v1/market/prime", post(prime_market))
         .route("/v1/execute/plan", post(build_execution_plan))
+        .route("/v1/fills/reconcile", post(reconcile_fills))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -191,6 +227,12 @@ async fn build_execution_plan(
     Json(request): Json<ExecutionPlanRequest>,
 ) -> Json<ExecutionPlanResponse> {
     Json(build_execution_plan_response(request))
+}
+
+async fn reconcile_fills(
+    Json(request): Json<FillReconcileRequest>,
+) -> Json<FillReconcileResponse> {
+    Json(build_fill_reconcile_response(request))
 }
 
 fn build_execution_plan_response(request: ExecutionPlanRequest) -> ExecutionPlanResponse {
@@ -292,6 +334,98 @@ fn evaluate_tradability(request: &ExecutionPlanRequest) -> Option<String> {
         return Some(format!("price_moved:{:.1}%", deviation * 100.0));
     }
     None
+}
+
+fn build_fill_reconcile_response(request: FillReconcileRequest) -> FillReconcileResponse {
+    let mut total_quantity = 0.0_f64;
+    let mut total_size_usd = 0.0_f64;
+    let mut latest_fill_ts: Option<f64> = None;
+
+    for fill in request.fills {
+        total_quantity += fill.size_shares.max(0.0);
+        total_size_usd += fill.size_usd.max(0.0);
+        latest_fill_ts = match latest_fill_ts {
+            Some(existing) if existing >= fill.traded_at_ts => Some(existing),
+            _ => Some(fill.traded_at_ts),
+        };
+    }
+
+    let delta_quantity = (total_quantity - request.current_filled_quantity).max(0.0);
+    let delta_size_usd = (total_size_usd - request.current_filled_size_usd).max(0.0);
+    let delta_price_cents = if delta_quantity > 0.0 && delta_size_usd > 0.0 {
+        round4((delta_size_usd / delta_quantity) * 100.0)
+    } else {
+        0.0
+    };
+    let filled_price_cents = if total_quantity > 0.0 {
+        round4((total_size_usd / total_quantity) * 100.0)
+    } else {
+        0.0
+    };
+
+    let size_tolerance = f64::max(f64::min(request.copied_trade_size_usd * 0.01, 0.1), 0.01);
+    let fully_filled = total_size_usd + size_tolerance >= request.copied_trade_size_usd;
+
+    if total_size_usd <= 0.0 {
+        if request.order_open == Some(false) {
+            return FillReconcileResponse {
+                status: "canceled".to_string(),
+                reason: "canceled_without_fill".to_string(),
+                total_quantity,
+                total_size_usd: round4(total_size_usd),
+                filled_price_cents,
+                delta_quantity: round4(delta_quantity),
+                delta_size_usd: round4(delta_size_usd),
+                delta_price_cents,
+                latest_fill_ts,
+                order_open: request.order_open,
+            };
+        }
+        return FillReconcileResponse {
+            status: "submitted".to_string(),
+            reason: "submitted_waiting_fill".to_string(),
+            total_quantity: round4(total_quantity),
+            total_size_usd: round4(total_size_usd),
+            filled_price_cents,
+            delta_quantity: round4(delta_quantity),
+            delta_size_usd: round4(delta_size_usd),
+            delta_price_cents,
+            latest_fill_ts,
+            order_open: request.order_open,
+        };
+    }
+
+    if fully_filled {
+        return FillReconcileResponse {
+            status: "filled".to_string(),
+            reason: format!("filled @ {filled_price_cents:.2}c"),
+            total_quantity: round4(total_quantity),
+            total_size_usd: round4(total_size_usd),
+            filled_price_cents,
+            delta_quantity: round4(delta_quantity),
+            delta_size_usd: round4(delta_size_usd),
+            delta_price_cents,
+            latest_fill_ts,
+            order_open: request.order_open,
+        };
+    }
+
+    let mut reason = format!("partial_fill ${:.2} @ {:.2}c", total_size_usd, filled_price_cents);
+    if request.order_open == Some(false) {
+        reason.push_str(" | remainder_canceled");
+    }
+    FillReconcileResponse {
+        status: "partial".to_string(),
+        reason,
+        total_quantity: round4(total_quantity),
+        total_size_usd: round4(total_size_usd),
+        filled_price_cents,
+        delta_quantity: round4(delta_quantity),
+        delta_size_usd: round4(delta_size_usd),
+        delta_price_cents,
+        latest_fill_ts,
+        order_open: request.order_open,
+    }
 }
 
 async fn get_or_fetch_snapshot(state: &AppState, token_id: &str) -> Result<Option<OrderbookSnapshot>> {
@@ -480,5 +614,28 @@ mod tests {
         let response = build_execution_plan_response(request);
         assert!(!response.allowed);
         assert_eq!(response.reason.as_deref(), Some("low_liquidity:0.60<15.00"));
+    }
+
+    #[test]
+    fn fill_reconcile_marks_filled() {
+        let response = build_fill_reconcile_response(FillReconcileRequest {
+            copied_trade_size_usd: 7.0,
+            current_filled_quantity: 0.0,
+            current_filled_size_usd: 0.0,
+            fills: vec![FillRow {
+                order_id: Some("ord-1".to_string()),
+                market_id: Some("mkt-1".to_string()),
+                token_id: Some("tok-1".to_string()),
+                side: "buy".to_string(),
+                price_cents: 60.0,
+                size_shares: 10.0,
+                size_usd: 7.0,
+                traded_at_ts: 1_700_000_000.0,
+            }],
+            order_open: Some(false),
+        });
+        assert_eq!(response.status, "filled");
+        assert_eq!(response.reason, "filled @ 70.00c");
+        assert_eq!(response.delta_size_usd, 7.0);
     }
 }

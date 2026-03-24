@@ -89,6 +89,10 @@ class Settings(BaseSettings):
         default=False,
         alias="EXECUTION_SIDECAR_EXECUTION_PLAN_ENABLED",
     )
+    execution_sidecar_fill_reconcile_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_SIDECAR_FILL_RECONCILE_ENABLED",
+    )
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")
 

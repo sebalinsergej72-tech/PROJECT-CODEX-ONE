@@ -8,6 +8,8 @@ from config.settings import settings
 from contracts.execution_sidecar import (
     SidecarExecutionPlanRequest,
     SidecarExecutionPlanResponse,
+    SidecarFillReconcileRequest,
+    SidecarFillReconcileResponse,
     SidecarOrderbookSnapshot,
     SidecarPrimeMarketDataRequest,
     SidecarPrimeMarketDataResponse,
@@ -81,6 +83,19 @@ class ExecutionSidecarClient:
             response.raise_for_status()
             raw = await response.json()
         return SidecarExecutionPlanResponse.model_validate(raw)
+
+    async def reconcile_fills(
+        self,
+        request: SidecarFillReconcileRequest,
+    ) -> SidecarFillReconcileResponse:
+        session = await self._ensure_session()
+        async with session.post(
+            f"{self._base_url}/v1/fills/reconcile",
+            json=request.model_dump(mode="json"),
+        ) as response:
+            response.raise_for_status()
+            raw = await response.json()
+        return SidecarFillReconcileResponse.model_validate(raw)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:

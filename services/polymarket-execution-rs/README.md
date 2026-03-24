@@ -7,6 +7,7 @@ Current scope:
 - `/v1/market/snapshot/:token_id`
 - `/v1/market/prime`
 - `/v1/execute/plan`
+- `/v1/fills/reconcile`
 
 Current `/v1/execute/plan` behavior:
 - validates `no_orderbook`
@@ -14,6 +15,11 @@ Current `/v1/execute/plan` behavior:
 - validates `price_moved`
 - calculates aggressive/conservative execution plan fields
 - returns a normalized order payload for Python submit/fallback
+
+Current `/v1/fills/reconcile` behavior:
+- consumes normalized fill rows plus `order_open`
+- computes `submitted / partial / filled / canceled`
+- returns deltas for position upsert and lifecycle updates
 
 The sidecar is intentionally introduced as an optional execution-plane service.
 Python remains the control plane and fallback path.

@@ -547,6 +547,19 @@ class PolymarketClient:
             logger.debug("Execution sidecar plan build failed for {}: {}", request.external_trade_id, exc)
             return None
 
+    async def reconcile_fills_via_sidecar(self, request: Any) -> Any | None:
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_fill_reconcile_enabled
+            and self._execution_sidecar is not None
+        ):
+            return None
+        try:
+            return await self._execution_sidecar.reconcile_fills(request)
+        except Exception as exc:
+            logger.debug("Execution sidecar fill reconcile failed: {}", exc)
+            return None
+
     async def _run_market_ws_loop(self) -> None:
         while not self._market_ws_stop.is_set():
             if not self._market_ws_desired_assets:
