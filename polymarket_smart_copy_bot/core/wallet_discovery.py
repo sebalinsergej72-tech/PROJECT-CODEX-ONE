@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import RiskMode, settings
 from data.polymarket_client import PolymarketClient
-from models.models import CopiedTrade, TradeStatus
+from models.models import CopiedTrade, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import WalletConfig, load_wallets, utc_now
 from utils.notifications import NotificationService
@@ -60,6 +60,7 @@ class ScoredWallet:
     monthly_pnl_pct: float
     consecutive_losses: int
     wallet_age_days: int
+    copyability_penalty: float = 0.0
 
 
 @dataclass(slots=True)
@@ -120,6 +121,16 @@ class WalletMetrics:
     consecutive_losses: int
     wallet_age_days: int
     monthly_pnl_pct: float
+
+
+@dataclass(slots=True)
+class CopyabilityStats:
+    attempts: int = 0
+    fills: int = 0
+    no_orderbook: int = 0
+    low_liquidity: int = 0
+    price_moved: int = 0
+    hard_slippage: int = 0
 
 
 @dataclass(slots=True)
@@ -452,7 +463,7 @@ class WalletDiscovery:
         seeds: dict[str, CandidateSeed],
         thresholds: DiscoveryThresholds,
         reserve_thresholds: ReserveThresholds,
-        execution_stats: dict[str, tuple[int, int]],
+        execution_stats: dict[str, CopyabilityStats],
     ) -> tuple[list[ScoredWallet], list[ScoredWallet], dict[str, int], DiscoveryCounters]:
         limiter = asyncio.Semaphore(8)
         now = utc_now()
@@ -521,7 +532,7 @@ class WalletDiscovery:
         now: datetime,
         thresholds: DiscoveryThresholds,
         reserve_thresholds: ReserveThresholds,
-        execution_stats: tuple[int, int] | None,
+        execution_stats: CopyabilityStats | None,
     ) -> tuple[ScoredWallet | None, ScoredWallet | None, str | None, CandidateProgress]:
         progress = CandidateProgress()
 
@@ -660,9 +671,10 @@ class WalletDiscovery:
         self,
         seed: CandidateSeed,
         metrics: WalletMetrics,
-        execution_stats: tuple[int, int] | None,
+        execution_stats: CopyabilityStats | None,
     ) -> ScoredWallet:
         size_component = min(metrics.avg_size / 100, settings.avg_size_score_cap)
+        copyability_penalty = self._tradability_penalty(execution_stats)
         score = (
             metrics.win_rate * 120
             + metrics.monthly_pnl_pct * 80
@@ -672,7 +684,7 @@ class WalletDiscovery:
             - metrics.days_since_last * 3
             - metrics.consecutive_losses * 15
         )
-        score = max(score - self._tradability_penalty(execution_stats), 0.0)
+        score = max(score - copyability_penalty, 0.0)
 
         return ScoredWallet(
             address=seed.address,
@@ -688,6 +700,7 @@ class WalletDiscovery:
             monthly_pnl_pct=metrics.monthly_pnl_pct,
             consecutive_losses=metrics.consecutive_losses,
             wallet_age_days=metrics.wallet_age_days,
+            copyability_penalty=copyability_penalty,
         )
 
     @staticmethod
@@ -724,30 +737,62 @@ class WalletDiscovery:
         )
 
     @staticmethod
-    def _tradability_penalty(execution_stats: tuple[int, int] | None) -> float:
+    def _tradability_penalty(execution_stats: CopyabilityStats | tuple[int, int] | None) -> float:
         if execution_stats is None:
             return 0.0
-        attempts, fills = execution_stats
+        if isinstance(execution_stats, tuple):
+            stats = CopyabilityStats(attempts=int(execution_stats[0]), fills=int(execution_stats[1]))
+        else:
+            stats = execution_stats
+        attempts = stats.attempts
+        fills = stats.fills
         if attempts < settings.min_attempts_for_tradability_penalty:
             return 0.0
 
         fill_rate = fills / attempts if attempts > 0 else 0.0
+        no_orderbook_rate = stats.no_orderbook / attempts if attempts > 0 else 0.0
+        low_liquidity_rate = stats.low_liquidity / attempts if attempts > 0 else 0.0
+        price_moved_rate = stats.price_moved / attempts if attempts > 0 else 0.0
+        hard_slippage_rate = stats.hard_slippage / attempts if attempts > 0 else 0.0
+
+        penalty = 0.0
         if fill_rate < 0.15:
-            return 100.0
-        if fill_rate < 0.30:
-            return 60.0
-        if fill_rate < 0.50:
-            return 30.0
-        if fill_rate < 0.70:
-            return 10.0
-        return 0.0
+            penalty += 100.0
+        elif fill_rate < 0.30:
+            penalty += 60.0
+        elif fill_rate < 0.50:
+            penalty += 30.0
+        elif fill_rate < 0.70:
+            penalty += 10.0
+
+        if no_orderbook_rate >= 0.35:
+            penalty += 40.0
+        elif no_orderbook_rate >= 0.20:
+            penalty += 20.0
+
+        if price_moved_rate >= 0.40:
+            penalty += 40.0
+        elif price_moved_rate >= 0.25:
+            penalty += 20.0
+
+        if low_liquidity_rate >= 0.20:
+            penalty += 20.0
+        elif low_liquidity_rate >= 0.10:
+            penalty += 10.0
+
+        if hard_slippage_rate >= 0.20:
+            penalty += 20.0
+        elif hard_slippage_rate >= 0.10:
+            penalty += 10.0
+
+        return min(penalty, 180.0)
 
     @staticmethod
     async def _load_recent_execution_stats(
         session: AsyncSession,
         *,
         days: int,
-    ) -> dict[str, tuple[int, int]]:
+    ) -> dict[str, CopyabilityStats]:
         cutoff = utc_now() - timedelta(days=max(days, 1))
         query = select(
             CopiedTrade.wallet_address,
@@ -761,17 +806,61 @@ class WalletDiscovery:
                     else_=0,
                 )
             ),
+            func.sum(
+                case(
+                    (
+                        CopiedTrade.reason == "no_orderbook",
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case(
+                    (
+                        CopiedTrade.reason.like("low_liquidity:%"),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case(
+                    (
+                        CopiedTrade.reason.like("price_moved:%"),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case(
+                    (
+                        CopiedTrade.reason == "slippage_above_hard_limit",
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
         ).where(
             CopiedTrade.copied_at >= cutoff,
             CopiedTrade.status != TradeStatus.PENDING.value,
+            CopiedTrade.side == TradeSide.BUY.value,
         ).group_by(CopiedTrade.wallet_address)
 
         rows = (await session.execute(query)).all()
-        stats: dict[str, tuple[int, int]] = {}
-        for wallet_address, attempts, fills in rows:
+        stats: dict[str, CopyabilityStats] = {}
+        for wallet_address, attempts, fills, no_orderbook, low_liquidity, price_moved, hard_slippage in rows:
             if wallet_address is None:
                 continue
-            stats[str(wallet_address).lower()] = (int(attempts or 0), int(fills or 0))
+            stats[str(wallet_address).lower()] = CopyabilityStats(
+                attempts=int(attempts or 0),
+                fills=int(fills or 0),
+                no_orderbook=int(no_orderbook or 0),
+                low_liquidity=int(low_liquidity or 0),
+                price_moved=int(price_moved or 0),
+                hard_slippage=int(hard_slippage or 0),
+            )
         return stats
 
     async def _request_top_wallet_approval(self, wallet: ScoredWallet) -> bool:

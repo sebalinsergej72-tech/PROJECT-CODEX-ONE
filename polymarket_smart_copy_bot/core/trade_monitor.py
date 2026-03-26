@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 
 from loguru import logger
 from sqlalchemy import select
@@ -14,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import settings
 from data.polymarket_client import OrderbookSnapshot, PolymarketClient, WalletOpenPosition, WalletTradeSignal
-from models.models import CopiedTrade, Position, TradeSide, TradeStatus
+from models.models import CopiedTrade, ExecutionDecisionAudit, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 
 
@@ -106,14 +108,7 @@ class TradeMonitor:
         recent_buy_locks = await self._fetch_recent_buy_locks(session)
         sellable_positions = await self._fetch_local_sellable_positions(session)
         intents: list[TradeIntent] = []
-        trade_tasks = [
-            self.polymarket_client.fetch_wallet_trades(
-                wallet.address,
-                limit=max(1, settings.trade_monitor_signal_fetch_limit),
-            )
-            for wallet in scan_wallets
-        ]
-        fetched_trade_batches = await asyncio.gather(*trade_tasks, return_exceptions=True)
+        fetched_trade_batches = await self._fetch_fresh_wallet_trade_batches(session, scan_wallets)
 
         for wallet, trade_batch in zip(
             scan_wallets,
@@ -200,10 +195,132 @@ class TradeMonitor:
         token_ids = [intent.token_id for intent in intents if intent.token_id]
         if not token_ids:
             return
+        register_hot_markets = getattr(self.polymarket_client, "register_hot_markets", None)
+        if callable(register_hot_markets):
+            with contextlib.suppress(Exception):
+                await register_hot_markets(
+                    token_ids,
+                    source="trade_monitor_intents",
+                    priority=100,
+                )
         try:
             await prime_market_data(token_ids)
         except Exception as exc:
             logger.debug("Market data prewarm failed: {}", exc)
+
+    async def _fetch_fresh_wallet_trade_batches(
+        self,
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+    ) -> list[list[WalletTradeSignal] | Exception]:
+        signal_limit = max(1, settings.trade_monitor_signal_fetch_limit)
+        wallet_addresses = [wallet.address for wallet in wallets]
+        sidecar_scan = getattr(self.polymarket_client, "scan_hot_wallet_trades_via_sidecar", None)
+        if callable(sidecar_scan):
+            sidecar_started = perf_counter()
+            sidecar_batches = await sidecar_scan(wallet_addresses, signal_limit=signal_limit)
+            sidecar_latency_ms = round((perf_counter() - sidecar_started) * 1000.0, 4)
+            if sidecar_batches is not None:
+                python_batches_map: dict[str, list[WalletTradeSignal] | Exception] = {}
+                python_latency_ms: float | None = None
+                if settings.execution_sidecar_shadow_mode_enabled:
+                    fallback_tasks = [
+                        self.polymarket_client.fetch_wallet_trades(wallet_address, limit=signal_limit)
+                        for wallet_address in wallet_addresses
+                    ]
+                    python_started = perf_counter()
+                    fallback_batches = await asyncio.gather(*fallback_tasks, return_exceptions=True)
+                    python_latency_ms = round((perf_counter() - python_started) * 1000.0, 4)
+                    python_batches_map = {
+                        wallet.address.lower(): batch
+                        for wallet, batch in zip(wallets, fallback_batches, strict=True)
+                    }
+                    await self._record_hot_wallet_scan_audits(
+                        session=session,
+                        wallets=wallets,
+                        rust_batches=sidecar_batches,
+                        python_batches=python_batches_map,
+                        rust_latency_ms=sidecar_latency_ms,
+                        python_latency_ms=python_latency_ms,
+                    )
+                results: list[list[WalletTradeSignal] | Exception] = []
+                missing_wallets: list[str] = []
+                missing_indexes: list[int] = []
+                for wallet in wallets:
+                    batch = sidecar_batches.get(wallet.address.lower())
+                    if batch is None:
+                        missing_wallets.append(wallet.address)
+                        missing_indexes.append(len(results))
+                        results.append(
+                            python_batches_map.get(wallet.address.lower(), [])
+                            if python_batches_map
+                            else []
+                        )
+                    else:
+                        results.append(batch)
+                if missing_wallets:
+                    if python_batches_map:
+                        for idx, wallet_address in zip(missing_indexes, missing_wallets, strict=True):
+                            results[idx] = python_batches_map.get(wallet_address.lower(), [])
+                    else:
+                        fallback_tasks = [
+                            self.polymarket_client.fetch_wallet_trades(wallet_address, limit=signal_limit)
+                            for wallet_address in missing_wallets
+                        ]
+                        fallback_batches = await asyncio.gather(*fallback_tasks, return_exceptions=True)
+                        for idx, fallback_batch in zip(missing_indexes, fallback_batches, strict=True):
+                            results[idx] = fallback_batch
+                return results
+
+        trade_tasks = [
+            self.polymarket_client.fetch_wallet_trades(wallet.address, limit=signal_limit)
+            for wallet in wallets
+        ]
+        return await asyncio.gather(*trade_tasks, return_exceptions=True)
+
+    @staticmethod
+    async def _record_hot_wallet_scan_audits(
+        *,
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+        rust_batches: dict[str, list[WalletTradeSignal]],
+        python_batches: dict[str, list[WalletTradeSignal] | Exception],
+        rust_latency_ms: float | None,
+        python_latency_ms: float | None,
+    ) -> None:
+        for wallet in wallets:
+            address = wallet.address.lower()
+            rust_rows = rust_batches.get(address, [])
+            python_rows_or_exc = python_batches.get(address, [])
+            python_error = python_rows_or_exc if isinstance(python_rows_or_exc, Exception) else None
+            python_rows = [] if isinstance(python_rows_or_exc, Exception) else list(python_rows_or_exc)
+            rust_ids = {row.external_trade_id for row in rust_rows}
+            python_ids = {row.external_trade_id for row in python_rows}
+            session.add(
+                ExecutionDecisionAudit(
+                    stage="hot_wallet_scan",
+                    wallet_address=wallet.address,
+                    python_status="scanned" if python_error is None else "error",
+                    rust_status="scanned",
+                    python_reason=(
+                        None
+                        if python_error is None
+                        else str(python_error)
+                    ),
+                    rust_reason=f"signals:{len(rust_rows)}",
+                    python_signal_count=len(python_rows),
+                    rust_signal_count=len(rust_rows),
+                    overlap_signal_count=len(rust_ids & python_ids),
+                    python_latency_ms=python_latency_ms,
+                    rust_latency_ms=rust_latency_ms,
+                    decision_delta_ms=(
+                        round((rust_latency_ms or 0.0) - (python_latency_ms or 0.0), 4)
+                        if python_latency_ms is not None and rust_latency_ms is not None
+                        else None
+                    ),
+                    matched=(rust_ids == python_ids) if python_error is None else False,
+                )
+            )
 
     async def _attach_market_snapshots(self, intents: list[TradeIntent]) -> None:
         if not intents:

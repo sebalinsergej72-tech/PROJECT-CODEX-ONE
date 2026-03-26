@@ -81,9 +81,41 @@ class Settings(BaseSettings):
         default=0.75,
         alias="EXECUTION_SIDECAR_TIMEOUT_SECONDS",
     )
+    execution_sidecar_push_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_PUSH_ENABLED",
+    )
+    execution_sidecar_push_host: str = Field(
+        default="127.0.0.1",
+        alias="EXECUTION_SIDECAR_PUSH_HOST",
+    )
+    execution_sidecar_push_port: int = Field(
+        default=8788,
+        alias="EXECUTION_SIDECAR_PUSH_PORT",
+    )
+    execution_sidecar_push_reconnect_seconds: float = Field(
+        default=1.0,
+        alias="EXECUTION_SIDECAR_PUSH_RECONNECT_SECONDS",
+    )
+    execution_sidecar_hot_market_registry_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_HOT_MARKET_REGISTRY_ENABLED",
+    )
+    execution_sidecar_hot_market_ttl_seconds: int = Field(
+        default=300,
+        alias="EXECUTION_SIDECAR_HOT_MARKET_TTL_SECONDS",
+    )
+    execution_sidecar_hot_signal_ingest_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_HOT_SIGNAL_INGEST_ENABLED",
+    )
     execution_sidecar_market_data_enabled: bool = Field(
         default=True,
         alias="EXECUTION_SIDECAR_MARKET_DATA_ENABLED",
+    )
+    execution_sidecar_executable_snapshot_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_EXECUTABLE_SNAPSHOT_ENABLED",
     )
     execution_sidecar_execution_plan_enabled: bool = Field(
         default=False,
@@ -92,6 +124,14 @@ class Settings(BaseSettings):
     execution_sidecar_fill_reconcile_enabled: bool = Field(
         default=False,
         alias="EXECUTION_SIDECAR_FILL_RECONCILE_ENABLED",
+    )
+    execution_sidecar_shadow_mode_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_SIDECAR_SHADOW_MODE_ENABLED",
+    )
+    execution_sidecar_authenticated_reads_enabled: bool = Field(
+        default=True,
+        alias="EXECUTION_SIDECAR_AUTHENTICATED_READS_ENABLED",
     )
 
     risk_mode: RiskMode = Field(default="aggressive", alias="RISK_MODE")

@@ -115,6 +115,23 @@ class OrderbookSnapshot:
     best_ask: float | None
 
 
+@dataclass(slots=True)
+class ExecutableSnapshot:
+    best_bid: float | None
+    best_ask: float | None
+    buy_vwap_5usd: float | None
+    buy_vwap_10usd: float | None
+    buy_vwap_25usd: float | None
+    sell_vwap_5usd: float | None
+    sell_vwap_10usd: float | None
+    sell_vwap_25usd: float | None
+    top5_ask_liquidity_usd: float
+    top5_bid_liquidity_usd: float
+    has_book: bool
+    last_update_ts: float | None = None
+    snapshot_age_ms: int | None = None
+
+
 class PolymarketClient:
     """Polymarket data + order execution client with retry and timeout guards."""
 
@@ -133,6 +150,8 @@ class PolymarketClient:
         self._market_ws_subscribed_assets: set[str] = set()
         self._market_ws_books: dict[str, dict[str, dict[float, float]]] = {}
         self._market_ws_book_updated_at: dict[str, datetime] = {}
+        self._executable_snapshots: dict[str, ExecutableSnapshot] = {}
+        self._executable_snapshot_updated_at: dict[str, datetime] = {}
         self._market_ws_waiters: dict[str, asyncio.Event] = {}
         self._market_ws_lock = asyncio.Lock()
         self._market_ws_send_lock = asyncio.Lock()
@@ -499,6 +518,58 @@ class PolymarketClient:
             return None
         return self._get_market_ws_snapshot(normalized_token)
 
+    async def fetch_executable_snapshot(self, token_id: str | None) -> ExecutableSnapshot | None:
+        normalized_token = str(token_id or "").strip()
+        if not normalized_token:
+            return None
+
+        await self.register_hot_markets([normalized_token], source="fetch_executable_snapshot", priority=80)
+        cached = self.get_cached_executable_snapshot(normalized_token)
+        if cached is not None:
+            return cached
+
+        if (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_market_data_enabled
+            and settings.execution_sidecar_executable_snapshot_enabled
+            and self._execution_sidecar is not None
+        ):
+            try:
+                snapshot = await self._execution_sidecar.fetch_executable_snapshot(normalized_token)
+            except Exception as exc:
+                logger.debug("Execution sidecar executable snapshot fetch failed for {}: {}", normalized_token, exc)
+            else:
+                if snapshot is not None:
+                    self._store_executable_snapshot(normalized_token, snapshot)
+                    return snapshot
+
+        orderbook = self.get_cached_orderbook(normalized_token)
+        if orderbook is None:
+            orderbook = await self.fetch_orderbook(normalized_token)
+        if orderbook is None:
+            return None
+        updated_at = self._market_ws_book_updated_at.get(normalized_token, datetime.now(tz=timezone.utc))
+        snapshot = self._build_executable_snapshot_from_orderbook(orderbook, updated_at=updated_at)
+        self._store_executable_snapshot(normalized_token, snapshot, updated_at=updated_at)
+        return snapshot
+
+    def get_cached_executable_snapshot(self, token_id: str | None) -> ExecutableSnapshot | None:
+        normalized_token = str(token_id or "").strip()
+        if not normalized_token:
+            return None
+        updated_at = self._executable_snapshot_updated_at.get(normalized_token)
+        snapshot = self._executable_snapshots.get(normalized_token)
+        ttl = timedelta(seconds=max(1, settings.polymarket_market_ws_cache_ttl_seconds))
+        if updated_at is not None and snapshot is not None and datetime.now(tz=timezone.utc) - updated_at <= ttl:
+            return snapshot
+        if self._execution_sidecar is not None:
+            with contextlib.suppress(Exception):
+                pushed = self._execution_sidecar.get_cached_executable_snapshot(normalized_token)
+                if pushed is not None:
+                    self._store_executable_snapshot(normalized_token, pushed)
+                    return pushed
+        return None
+
     async def prime_market_data(self, token_ids: list[str | None]) -> None:
         normalized = {
             str(token_id).strip()
@@ -519,6 +590,9 @@ class PolymarketClient:
                 missing = [token_id for token_id, snapshot in snapshots.items() if snapshot is None]
                 for token_id in missing:
                     self._missing_orderbooks.add(token_id)
+                if settings.execution_sidecar_executable_snapshot_enabled:
+                    with contextlib.suppress(Exception):
+                        await self.prime_executable_market_data(sorted(normalized))
                 # If every requested token already has a snapshot, do not do extra Python-side priming.
                 if snapshots and all(token_id in snapshots and snapshots[token_id] is not None for token_id in normalized):
                     return
@@ -533,6 +607,81 @@ class PolymarketClient:
                 self._market_ws_waiters.setdefault(token_id, asyncio.Event())
             self._market_ws_wakeup.set()
         await self._send_market_ws_subscription(sorted(newly_desired))
+
+    async def prime_executable_market_data(self, token_ids: list[str | None]) -> None:
+        normalized = sorted({
+            str(token_id).strip()
+            for token_id in token_ids
+            if str(token_id or "").strip()
+        })
+        if not normalized:
+            return
+        await self.register_hot_markets(normalized, source="prime_executable_market_data", priority=90)
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_market_data_enabled
+            and settings.execution_sidecar_executable_snapshot_enabled
+            and self._execution_sidecar is not None
+        ):
+            return
+        try:
+            snapshots = await self._execution_sidecar.prime_executable_market_data(normalized)
+        except Exception as exc:
+            logger.debug("Execution sidecar executable market prime failed: {}", exc)
+            return
+        for token_id, snapshot in snapshots.items():
+            if snapshot is not None:
+                self._store_executable_snapshot(token_id, snapshot)
+
+    async def register_hot_markets(self, token_ids: list[str | None], *, source: str, priority: int = 0) -> int:
+        normalized = sorted({
+            str(token_id).strip()
+            for token_id in token_ids
+            if str(token_id or "").strip()
+        })
+        if not normalized:
+            return 0
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_hot_market_registry_enabled
+            and self._execution_sidecar is not None
+        ):
+            return 0
+        try:
+            return await self._execution_sidecar.register_hot_markets(
+                normalized,
+                ttl_seconds=settings.execution_sidecar_hot_market_ttl_seconds,
+                source=source,
+                priority=priority,
+            )
+        except Exception as exc:
+            logger.debug("Execution sidecar hot market registration failed: {}", exc)
+            return 0
+
+    async def scan_hot_wallet_trades_via_sidecar(
+        self,
+        wallet_addresses: list[str],
+        *,
+        signal_limit: int,
+    ) -> dict[str, list[WalletTradeSignal]] | None:
+        normalized = [wallet_address.strip() for wallet_address in wallet_addresses if wallet_address and wallet_address.strip()]
+        if not normalized:
+            return {}
+        if not (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_hot_signal_ingest_enabled
+            and self._execution_sidecar is not None
+        ):
+            return None
+        try:
+            return await self._execution_sidecar.scan_hot_wallet_trades(
+                normalized,
+                signal_limit=signal_limit,
+                hot_market_ttl_seconds=settings.execution_sidecar_hot_market_ttl_seconds,
+            )
+        except Exception as exc:
+            logger.debug("Execution sidecar hot wallet scan failed: {}", exc)
+            return None
 
     async def build_execution_plan_via_sidecar(self, request: Any) -> Any | None:
         if not (
@@ -677,11 +826,17 @@ class PolymarketClient:
 
     def _store_market_ws_snapshot(self, token_id: str, snapshot: OrderbookSnapshot) -> None:
         normalized_token = str(token_id).strip()
+        updated_at = datetime.now(tz=timezone.utc)
         self._market_ws_books[normalized_token] = {
             "bids": {level.price: level.size for level in snapshot.bids},
             "asks": {level.price: level.size for level in snapshot.asks},
         }
-        self._market_ws_book_updated_at[normalized_token] = datetime.now(tz=timezone.utc)
+        self._market_ws_book_updated_at[normalized_token] = updated_at
+        self._store_executable_snapshot(
+            normalized_token,
+            self._build_executable_snapshot_from_orderbook(snapshot, updated_at=updated_at),
+            updated_at=updated_at,
+        )
         waiter = self._market_ws_waiters.get(normalized_token)
         if waiter is not None:
             waiter.set()
@@ -720,7 +875,15 @@ class PolymarketClient:
                 book[side_key][price] = size
             updated = True
         if updated:
-            self._market_ws_book_updated_at[token_id] = datetime.now(tz=timezone.utc)
+            updated_at = datetime.now(tz=timezone.utc)
+            self._market_ws_book_updated_at[token_id] = updated_at
+            snapshot = self._build_snapshot_from_market_ws_book(book)
+            if snapshot is not None:
+                self._store_executable_snapshot(
+                    token_id,
+                    self._build_executable_snapshot_from_orderbook(snapshot, updated_at=updated_at),
+                    updated_at=updated_at,
+                )
             waiter = self._market_ws_waiters.get(token_id)
             if waiter is not None:
                 waiter.set()
@@ -745,7 +908,15 @@ class PolymarketClient:
                 book["asks"][best_ask] = ask_size
             updated = True
         if updated:
-            self._market_ws_book_updated_at[token_id] = datetime.now(tz=timezone.utc)
+            updated_at = datetime.now(tz=timezone.utc)
+            self._market_ws_book_updated_at[token_id] = updated_at
+            snapshot = self._build_snapshot_from_market_ws_book(book)
+            if snapshot is not None:
+                self._store_executable_snapshot(
+                    token_id,
+                    self._build_executable_snapshot_from_orderbook(snapshot, updated_at=updated_at),
+                    updated_at=updated_at,
+                )
             waiter = self._market_ws_waiters.get(token_id)
             if waiter is not None:
                 waiter.set()
@@ -759,6 +930,63 @@ class PolymarketClient:
         if datetime.now(tz=timezone.utc) - updated_at > ttl:
             return None
         return self._build_snapshot_from_market_ws_book(book)
+
+    def _store_executable_snapshot(
+        self,
+        token_id: str,
+        snapshot: ExecutableSnapshot,
+        *,
+        updated_at: datetime | None = None,
+    ) -> None:
+        normalized_token = str(token_id).strip()
+        self._executable_snapshots[normalized_token] = snapshot
+        self._executable_snapshot_updated_at[normalized_token] = updated_at or datetime.now(tz=timezone.utc)
+
+    @classmethod
+    def _build_executable_snapshot_from_orderbook(
+        cls,
+        orderbook: OrderbookSnapshot,
+        *,
+        updated_at: datetime | None = None,
+    ) -> ExecutableSnapshot:
+        top5_ask_liquidity_usd = round(sum(level.price * level.size for level in orderbook.asks[:5]), 4)
+        top5_bid_liquidity_usd = round(sum(level.price * level.size for level in orderbook.bids[:5]), 4)
+        timestamp = updated_at or datetime.now(tz=timezone.utc)
+        return ExecutableSnapshot(
+            best_bid=orderbook.best_bid,
+            best_ask=orderbook.best_ask,
+            buy_vwap_5usd=cls._compute_orderbook_vwap(orderbook.asks, 5.0),
+            buy_vwap_10usd=cls._compute_orderbook_vwap(orderbook.asks, 10.0),
+            buy_vwap_25usd=cls._compute_orderbook_vwap(orderbook.asks, 25.0),
+            sell_vwap_5usd=cls._compute_orderbook_vwap(orderbook.bids, 5.0),
+            sell_vwap_10usd=cls._compute_orderbook_vwap(orderbook.bids, 10.0),
+            sell_vwap_25usd=cls._compute_orderbook_vwap(orderbook.bids, 25.0),
+            top5_ask_liquidity_usd=top5_ask_liquidity_usd,
+            top5_bid_liquidity_usd=top5_bid_liquidity_usd,
+            has_book=bool(orderbook.bids or orderbook.asks),
+            last_update_ts=timestamp.timestamp(),
+            snapshot_age_ms=0,
+        )
+
+    @staticmethod
+    def _compute_orderbook_vwap(levels: list[OrderbookLevel], target_usd: float) -> float | None:
+        remaining_usd = float(target_usd)
+        total_size = 0.0
+        total_usd = 0.0
+        for level in levels:
+            if remaining_usd <= 0:
+                break
+            level_usd = level.price * level.size
+            if level.price <= 0 or level.size <= 0 or level_usd <= 0:
+                continue
+            take_usd = min(level_usd, remaining_usd)
+            take_size = take_usd / level.price
+            total_usd += take_usd
+            total_size += take_size
+            remaining_usd -= take_usd
+        if remaining_usd > 1e-9 or total_size <= 0:
+            return None
+        return round(total_usd / total_size, 4)
 
     async def _wait_for_market_ws_snapshot(
         self,
@@ -1060,11 +1288,25 @@ class PolymarketClient:
         if not settings.polymarket_private_key:
             return None
 
-        try:
-            rows = await asyncio.to_thread(self._fetch_open_orders_sync, market_id, token_id)
-        except Exception as exc:
-            logger.warning("Failed to fetch open orders: {}", exc)
-            return None
+        rows: list[dict[str, Any]] | None = None
+        if (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_authenticated_reads_enabled
+            and self._execution_sidecar is not None
+        ):
+            try:
+                rows = await self._execution_sidecar.fetch_open_orders(
+                    market_id=market_id,
+                    token_id=token_id,
+                )
+            except Exception as exc:
+                logger.debug("Sidecar open orders fetch failed, falling back to Python path: {}", exc)
+        if rows is None:
+            try:
+                rows = await asyncio.to_thread(self._fetch_open_orders_sync, market_id, token_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch open orders: {}", exc)
+                return None
 
         now = datetime.now(tz=timezone.utc)
         orders: list[OpenOrderInfo] = []
@@ -1102,11 +1344,22 @@ class PolymarketClient:
             return None
         if not order_id:
             return None
-        try:
-            payload = await asyncio.to_thread(self._get_order_sync, order_id)
-        except Exception as exc:
-            logger.warning("Failed to fetch order {}: {}", order_id, exc)
-            return None
+        payload: dict[str, Any] | None = None
+        if (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_authenticated_reads_enabled
+            and self._execution_sidecar is not None
+        ):
+            try:
+                payload = await self._execution_sidecar.fetch_order_status(order_id)
+            except Exception as exc:
+                logger.debug("Sidecar order status fetch failed, falling back to Python path: {}", exc)
+        if payload is None:
+            try:
+                payload = await asyncio.to_thread(self._get_order_sync, order_id)
+            except Exception as exc:
+                logger.warning("Failed to fetch order {}: {}", order_id, exc)
+                return None
         return self._is_open_order_payload(payload)
 
     async def fetch_account_fills(
@@ -1130,17 +1383,33 @@ class PolymarketClient:
             return None
 
         safe_limit = max(1, min(limit, 500))
-        try:
-            rows = await asyncio.to_thread(
-                self._fetch_account_fills_sync,
-                after_ts,
-                market_id,
-                token_id,
-                safe_limit,
-            )
-        except Exception as exc:
-            logger.warning("Failed to fetch account fills: {}", exc)
-            return None
+        rows: list[dict[str, Any]] | None = None
+        if (
+            settings.execution_sidecar_enabled
+            and settings.execution_sidecar_authenticated_reads_enabled
+            and self._execution_sidecar is not None
+        ):
+            try:
+                rows = await self._execution_sidecar.fetch_account_fills(
+                    after_ts=after_ts,
+                    market_id=market_id,
+                    token_id=token_id,
+                    limit=safe_limit,
+                )
+            except Exception as exc:
+                logger.debug("Sidecar account fills fetch failed, falling back to Python path: {}", exc)
+        if rows is None:
+            try:
+                rows = await asyncio.to_thread(
+                    self._fetch_account_fills_sync,
+                    after_ts,
+                    market_id,
+                    token_id,
+                    safe_limit,
+                )
+            except Exception as exc:
+                logger.warning("Failed to fetch account fills: {}", exc)
+                return None
 
         target_side = side.lower() if isinstance(side, str) else None
         target_order_id = order_id.strip() if isinstance(order_id, str) and order_id.strip() else None

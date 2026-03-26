@@ -17,7 +17,7 @@ from contracts.execution_sidecar import (
     SidecarOrderRequest,
 )
 from data.polymarket_client import FillInfo, OrderbookLevel, OrderbookSnapshot
-from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
+from models.models import Base, CopiedTrade, ExecutionDecisionAudit, Position, TradeSide, TradeStatus
 
 
 def _intent(*, side: str, price_cents: float, size_usd: float) -> TradeIntent:
@@ -392,6 +392,81 @@ def test_execute_copy_trade_keeps_live_gtc_submitted_for_fill_monitor() -> None:
         assert row.order_id == "ord-1"
         assert row.ttl_expires_at is not None
         assert "awaiting_fill_monitor" in (row.reason or "")
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_plan_execution_writes_shadow_audit_row() -> None:
+    class _DummyPolymarketClient:
+        async def build_execution_plan_via_sidecar(self, request):
+            return SidecarExecutionPlanResponse(
+                allowed=True,
+                requested_price_cents=60.9,
+                requested_slippage_bps=150.0,
+                order_type="GTC",
+                echoed_order=SidecarOrderRequest(
+                    token_id="tok-1",
+                    side="buy",
+                    price_cents=60.9,
+                    size_usd=7.0,
+                    market_id="mkt-1",
+                    outcome="Yes",
+                    order_type="GTC",
+                ),
+            )
+
+    class _DummyRiskManager:
+        def can_accept_slippage(self, **kwargs):
+            return True, 150.0
+
+    class _DummyNotifications:
+        async def send_message(self, message: str) -> None:
+            return None
+
+    class _DummyPortfolioTracker:
+        ACCOUNT_SYNC_WALLET = "account_sync"
+
+    async def _case(session: AsyncSession) -> None:
+        executor = TradeExecutor(
+            _DummyPolymarketClient(),
+            _DummyRiskManager(),
+            _DummyNotifications(),
+            _DummyPortfolioTracker(),
+        )
+        orderbook = OrderbookSnapshot(
+            bids=[OrderbookLevel(price=0.59, size=100.0)],
+            asks=[OrderbookLevel(price=0.60, size=100.0)],
+            best_bid=0.59,
+            best_ask=0.60,
+        )
+        original_sidecar = settings.execution_sidecar_enabled
+        original_plan = settings.execution_sidecar_execution_plan_enabled
+        original_shadow = settings.execution_sidecar_shadow_mode_enabled
+        try:
+            settings.execution_sidecar_enabled = True
+            settings.execution_sidecar_execution_plan_enabled = True
+            settings.execution_sidecar_shadow_mode_enabled = True
+
+            outcome = await executor._plan_execution(
+                session=session,
+                intent=_intent(side="buy", price_cents=60.0, size_usd=7.0),
+                target_size_usd=7.0,
+                risk_mode="aggressive",
+                orderbook=orderbook,
+            )
+            assert outcome.plan is not None
+
+            rows = (await session.execute(select(ExecutionDecisionAudit))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].stage == "execution_plan"
+            assert rows[0].external_trade_id == "ext-buy-60.0-7.0"
+            assert rows[0].matched is True
+            assert rows[0].rust_status == "allowed"
+            assert rows[0].python_status == "allowed"
+        finally:
+            settings.execution_sidecar_enabled = original_sidecar
+            settings.execution_sidecar_execution_plan_enabled = original_plan
+            settings.execution_sidecar_shadow_mode_enabled = original_shadow
 
     asyncio.run(_run_with_session(_case))
 

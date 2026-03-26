@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from data.database import get_session
-from models.models import PortfolioSnapshot, WalletScore
+from models.models import ExecutionDecisionAudit, PortfolioSnapshot, WalletScore
 
 router = APIRouter(tags=["status"])
 
@@ -122,4 +122,44 @@ async def leaderboard(
             "avg_position_size": s.avg_position_size,
         }
         for s in scores
+    ]
+
+
+@router.get("/decision_audits")
+async def decision_audits(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    stage: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    query = select(ExecutionDecisionAudit).order_by(ExecutionDecisionAudit.created_at.desc()).limit(limit)
+    if stage:
+        query = query.where(ExecutionDecisionAudit.stage == stage.strip())
+    rows = (await session.execute(query)).scalars().all()
+    return [
+        {
+            "id": row.id,
+            "stage": row.stage,
+            "external_trade_id": row.external_trade_id,
+            "wallet_address": row.wallet_address,
+            "market_id": row.market_id,
+            "token_id": row.token_id,
+            "python_status": row.python_status,
+            "rust_status": row.rust_status,
+            "python_reason": row.python_reason,
+            "rust_reason": row.rust_reason,
+            "python_requested_price_cents": row.python_requested_price_cents,
+            "rust_requested_price_cents": row.rust_requested_price_cents,
+            "python_slippage_bps": row.python_slippage_bps,
+            "rust_slippage_bps": row.rust_slippage_bps,
+            "python_signal_count": row.python_signal_count,
+            "rust_signal_count": row.rust_signal_count,
+            "overlap_signal_count": row.overlap_signal_count,
+            "python_latency_ms": row.python_latency_ms,
+            "rust_latency_ms": row.rust_latency_ms,
+            "decision_delta_ms": row.decision_delta_ms,
+            "matched": row.matched,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
     ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -23,7 +24,7 @@ from core.portfolio_tracker import PortfolioTracker
 from core.risk_manager import PortfolioState, RiskManager
 from core.trade_monitor import TradeIntent
 from data.polymarket_client import OrderRequest, OrderbookSnapshot, PolymarketClient
-from models.models import CopiedTrade, ManualApproval, Position, TradeSide, TradeStatus
+from models.models import CopiedTrade, ExecutionDecisionAudit, ManualApproval, Position, TradeSide, TradeStatus
 from utils.notifications import NotificationService
 
 
@@ -271,6 +272,7 @@ class TradeExecutor:
         copied_trade.size_usd = target_size_usd
 
         planning_outcome = await self._plan_execution(
+            session=session,
             intent=intent,
             target_size_usd=target_size_usd,
             risk_mode=risk_mode,
@@ -534,17 +536,45 @@ class TradeExecutor:
     async def _plan_execution(
         self,
         *,
+        session: AsyncSession | None = None,
         intent: TradeIntent,
         target_size_usd: float,
         risk_mode: RiskMode,
         orderbook: OrderbookSnapshot | None,
     ) -> ExecutionPlanningOutcome:
+        shadow_enabled = bool(
+            session is not None
+            and settings.execution_sidecar_shadow_mode_enabled
+            and settings.execution_sidecar_enabled
+            and settings.execution_sidecar_execution_plan_enabled
+        )
+        rust_started = perf_counter()
         sidecar_plan = await self._build_execution_plan_via_sidecar(
             intent=intent,
             target_size_usd=target_size_usd,
             risk_mode=risk_mode,
             orderbook=orderbook,
         )
+        rust_elapsed_ms = round((perf_counter() - rust_started) * 1000.0, 4)
+        python_outcome: ExecutionPlanningOutcome | None = None
+        python_elapsed_ms: float | None = None
+        if shadow_enabled:
+            python_started = perf_counter()
+            python_outcome = self._plan_execution_python_path(
+                intent=intent,
+                target_size_usd=target_size_usd,
+                risk_mode=risk_mode,
+                orderbook=orderbook,
+            )
+            python_elapsed_ms = round((perf_counter() - python_started) * 1000.0, 4)
+            await self._record_execution_plan_audit(
+                session=session,
+                intent=intent,
+                python_outcome=python_outcome,
+                python_latency_ms=python_elapsed_ms,
+                sidecar_plan=sidecar_plan,
+                rust_latency_ms=rust_elapsed_ms,
+            )
         if sidecar_plan is not None:
             if not sidecar_plan.allowed:
                 return ExecutionPlanningOutcome(plan=None, reason=sidecar_plan.reason or "execution_plan_rejected")
@@ -556,6 +586,23 @@ class TradeExecutor:
                 intent.external_trade_id,
             )
 
+        if python_outcome is not None:
+            return python_outcome
+        return self._plan_execution_python_path(
+            intent=intent,
+            target_size_usd=target_size_usd,
+            risk_mode=risk_mode,
+            orderbook=orderbook,
+        )
+
+    def _plan_execution_python_path(
+        self,
+        *,
+        intent: TradeIntent,
+        target_size_usd: float,
+        risk_mode: RiskMode,
+        orderbook: OrderbookSnapshot | None,
+    ) -> ExecutionPlanningOutcome:
         tradable, tradability_reason = self._check_market_tradability(
             intent=intent,
             orderbook=orderbook,
@@ -636,6 +683,94 @@ class TradeExecutor:
             requested_price_cents=response.requested_price_cents,
             requested_slippage_bps=response.requested_slippage_bps,
             order_type=response.order_type,
+        )
+
+    async def _record_execution_plan_audit(
+        self,
+        *,
+        session: AsyncSession,
+        intent: TradeIntent,
+        python_outcome: ExecutionPlanningOutcome,
+        python_latency_ms: float | None,
+        sidecar_plan: SidecarExecutionPlanResponse | None,
+        rust_latency_ms: float | None,
+    ) -> None:
+        python_status, python_reason, python_price, python_slippage = self._execution_outcome_audit_fields(python_outcome)
+        rust_status, rust_reason, rust_price, rust_slippage = self._sidecar_plan_audit_fields(sidecar_plan)
+        session.add(
+            ExecutionDecisionAudit(
+                stage="execution_plan",
+                external_trade_id=intent.external_trade_id,
+                wallet_address=intent.wallet_address,
+                market_id=intent.market_id,
+                token_id=intent.token_id,
+                python_status=python_status,
+                rust_status=rust_status,
+                python_reason=python_reason,
+                rust_reason=rust_reason,
+                python_requested_price_cents=python_price,
+                rust_requested_price_cents=rust_price,
+                python_slippage_bps=python_slippage,
+                rust_slippage_bps=rust_slippage,
+                python_latency_ms=python_latency_ms,
+                rust_latency_ms=rust_latency_ms,
+                decision_delta_ms=(
+                    round((rust_latency_ms or 0.0) - (python_latency_ms or 0.0), 4)
+                    if python_latency_ms is not None and rust_latency_ms is not None
+                    else None
+                ),
+                matched=self._execution_plan_match(python_outcome=python_outcome, sidecar_plan=sidecar_plan),
+            )
+        )
+
+    @staticmethod
+    def _execution_outcome_audit_fields(
+        outcome: ExecutionPlanningOutcome,
+    ) -> tuple[str, str | None, float | None, float | None]:
+        if outcome.plan is None:
+            return ("rejected", outcome.reason, None, None)
+        return (
+            "allowed",
+            outcome.reason,
+            outcome.plan.requested_price_cents,
+            outcome.plan.requested_slippage_bps,
+        )
+
+    @staticmethod
+    def _sidecar_plan_audit_fields(
+        plan: SidecarExecutionPlanResponse | None,
+    ) -> tuple[str, str | None, float | None, float | None]:
+        if plan is None:
+            return ("unavailable", "sidecar_unavailable_or_fallback", None, None)
+        if not plan.allowed:
+            return ("rejected", plan.reason, None, plan.requested_slippage_bps)
+        return (
+            "allowed",
+            plan.reason,
+            plan.requested_price_cents,
+            plan.requested_slippage_bps,
+        )
+
+    @classmethod
+    def _execution_plan_match(
+        cls,
+        *,
+        python_outcome: ExecutionPlanningOutcome,
+        sidecar_plan: SidecarExecutionPlanResponse | None,
+    ) -> bool | None:
+        if sidecar_plan is None:
+            return None
+        python_status, python_reason, python_price, python_slippage = cls._execution_outcome_audit_fields(python_outcome)
+        rust_status, rust_reason, rust_price, rust_slippage = cls._sidecar_plan_audit_fields(sidecar_plan)
+        if python_status != rust_status:
+            return False
+        if python_status != "allowed":
+            return (python_reason or "") == (rust_reason or "")
+        if python_price is None or rust_price is None or python_slippage is None or rust_slippage is None:
+            return False
+        return (
+            abs(python_price - rust_price) <= 1e-6
+            and abs(python_slippage - rust_slippage) <= 1e-6
         )
 
     @staticmethod

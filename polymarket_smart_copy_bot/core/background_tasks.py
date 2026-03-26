@@ -170,6 +170,8 @@ class BackgroundOrchestrator:
             "open_orders_count": 0,
             "updated_at": None,
         }
+        self._last_seed_wallet_stats_at: datetime | None = None
+        self._cached_seed_wallet_stats: dict[str, Any] = self._empty_seed_wallet_stats()
         self._started = False
         self._bootstrap_task: asyncio.Task[None] | None = None
 
@@ -393,6 +395,8 @@ class BackgroundOrchestrator:
     async def _seed_wallets(self, session: AsyncSession) -> None:
         await self.wallet_discovery.import_seed_wallets(session, risk_mode=self._risk_mode)
         self._tracked_wallets_count = await self.wallet_discovery.count_enabled_wallets(session)
+        self._cached_seed_wallet_stats = await self._get_seed_wallets_stats()
+        self._last_seed_wallet_stats_at = datetime.now(tz=timezone.utc)
 
     async def _wallet_discovery_refresh(self, session: AsyncSession) -> None:
         result = await self.wallet_discovery.discover_and_score(
@@ -414,6 +418,8 @@ class BackgroundOrchestrator:
             await self.notifications.send_message(
                 f"Discovery: requested approvals={result.approvals_requested}, approved={result.approvals_granted}, skipped={result.approvals_skipped}"
             )
+        self._cached_seed_wallet_stats = await self._get_seed_wallets_stats()
+        self._last_seed_wallet_stats_at = datetime.now(tz=timezone.utc)
 
     async def _trade_monitor_scan(self, session: AsyncSession) -> None:
         if not self._trading_enabled:
@@ -913,6 +919,7 @@ class BackgroundOrchestrator:
             lambda session: self.wallet_discovery.add_wallet(session, normalized),
         )
         self._tracked_wallets_count = await self._enabled_wallet_count()
+        await self._refresh_seed_wallet_stats_snapshot()
         return {"ok": True, "address": normalized, "enabled_wallets": self._tracked_wallets_count}
 
     async def remove_wallet(self, address: str) -> dict:
@@ -925,6 +932,7 @@ class BackgroundOrchestrator:
             lambda session: self.wallet_discovery.remove_wallet(session, normalized),
         )
         self._tracked_wallets_count = await self._enabled_wallet_count()
+        await self._refresh_seed_wallet_stats_snapshot()
         return {"ok": bool(removed), "address": normalized, "enabled_wallets": self._tracked_wallets_count}
 
     async def _enabled_wallet_count(self) -> int:
@@ -935,10 +943,7 @@ class BackgroundOrchestrator:
         return int(value or 0)
 
     async def get_status(self) -> dict:
-        await self._refresh_portfolio_state_from_db()
-
-        # Seed wallet scoring stats from WalletScore table
-        seed_wallets_stats = await self._get_seed_wallets_stats()
+        seed_wallets_stats = getattr(self, "_cached_seed_wallet_stats", None) or self._empty_seed_wallet_stats()
 
         jobs = []
         for job in self.scheduler.get_jobs():
@@ -1108,7 +1113,23 @@ class BackgroundOrchestrator:
                 }
         except Exception:
             logger.exception("Failed to get seed wallet stats")
-            return {"total": 0, "enabled": 0, "disabled": 0, "avg_score": 0, "avg_win_rate": 0, "avg_profit_factor": 0, "disable_reasons": {}}
+            return self._empty_seed_wallet_stats()
+
+    async def _refresh_seed_wallet_stats_snapshot(self) -> None:
+        self._cached_seed_wallet_stats = await self._get_seed_wallets_stats()
+        self._last_seed_wallet_stats_at = datetime.now(tz=timezone.utc)
+
+    @staticmethod
+    def _empty_seed_wallet_stats() -> dict[str, Any]:
+        return {
+            "total": 0,
+            "enabled": 0,
+            "disabled": 0,
+            "avg_score": 0,
+            "avg_win_rate": 0,
+            "avg_profit_factor": 0,
+            "disable_reasons": {},
+        }
 
     async def get_pnl_status(self) -> dict:
         await self._refresh_portfolio_state_from_db()

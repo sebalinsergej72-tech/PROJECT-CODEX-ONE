@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
 from core.background_tasks import BackgroundOrchestrator
 from core.trade_monitor import TradeIntent, TradeMonitor
 from data.polymarket_client import OrderbookLevel, OrderbookSnapshot, WalletOpenPosition, WalletTradeSignal
-from models.models import Base, CopiedTrade, Position, TradeSide, TradeStatus
+from models.models import Base, CopiedTrade, ExecutionDecisionAudit, Position, TradeSide, TradeStatus
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import utc_now
 
@@ -142,12 +143,17 @@ class _WarmSnapshotPolymarketClient(_DummyPolymarketClient):
     def __init__(self) -> None:
         super().__init__()
         self.primed_token_ids: list[str] = []
+        self.registered_hot_token_ids: list[str] = []
         self.snapshot = OrderbookSnapshot(
             bids=[OrderbookLevel(price=0.54, size=100.0)],
             asks=[OrderbookLevel(price=0.55, size=100.0)],
             best_bid=0.54,
             best_ask=0.55,
         )
+
+    async def register_hot_markets(self, token_ids: list[str | None], *, source: str, priority: int = 0) -> int:
+        self.registered_hot_token_ids.extend(str(token_id) for token_id in token_ids if token_id)
+        return len(self.registered_hot_token_ids)
 
     async def prime_market_data(self, token_ids: list[str | None]) -> None:
         self.primed_token_ids.extend(str(token_id) for token_id in token_ids if token_id)
@@ -156,6 +162,87 @@ class _WarmSnapshotPolymarketClient(_DummyPolymarketClient):
         if token_id == "token-1":
             return self.snapshot
         return None
+
+
+class _SidecarHotScanPolymarketClient(_DummyPolymarketClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sidecar_scan_calls = 0
+
+    async def scan_hot_wallet_trades_via_sidecar(
+        self,
+        wallet_addresses: list[str],
+        *,
+        signal_limit: int,
+    ) -> dict[str, list[WalletTradeSignal]] | None:
+        self.sidecar_scan_calls += 1
+        assert signal_limit == settings.trade_monitor_signal_fetch_limit
+        return {
+            wallet_addresses[0].lower(): [
+                WalletTradeSignal(
+                    external_trade_id="sidecar-trade-1",
+                    wallet_address=wallet_addresses[0],
+                    market_id="market-sidecar",
+                    token_id="token-sidecar",
+                    outcome="Yes",
+                    side="buy",
+                    price_cents=61.0,
+                    size_usd=14.0,
+                    traded_at=utc_now(),
+                    market_slug="sidecar-market",
+                    market_category="Politics",
+                )
+            ]
+        }
+
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        raise AssertionError("Per-wallet Python polling should not run when sidecar hot scan succeeds")
+
+
+class _ShadowHotScanPolymarketClient(_DummyPolymarketClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sidecar_scan_calls = 0
+
+    async def scan_hot_wallet_trades_via_sidecar(
+        self,
+        wallet_addresses: list[str],
+        *,
+        signal_limit: int,
+    ) -> dict[str, list[WalletTradeSignal]] | None:
+        self.sidecar_scan_calls += 1
+        wallet_address = wallet_addresses[0]
+        signal = WalletTradeSignal(
+            external_trade_id="shadow-trade-1",
+            wallet_address=wallet_address,
+            market_id="market-shadow",
+            token_id="token-shadow",
+            outcome="Yes",
+            side="buy",
+            price_cents=62.0,
+            size_usd=12.0,
+            traded_at=utc_now(),
+            market_slug="shadow-market",
+            market_category="Politics",
+        )
+        return {wallet_address.lower(): [signal]}
+
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        return [
+            WalletTradeSignal(
+                external_trade_id="shadow-trade-1",
+                wallet_address=wallet_address,
+                market_id="market-shadow",
+                token_id="token-shadow",
+                outcome="Yes",
+                side="buy",
+                price_cents=62.0,
+                size_usd=12.0,
+                traded_at=utc_now(),
+                market_slug="shadow-market",
+                market_category="Politics",
+            )
+        ]
 
 
 def test_fast_trade_scan_uses_hot_limit_and_skips_reconcile_fetch() -> None:
@@ -419,8 +506,86 @@ def test_fast_trade_scan_attaches_warm_market_snapshot_to_intent() -> None:
         intents = await monitor.scan_for_fresh_trade_intents(session)
 
         assert len(intents) == 1
+        assert client.registered_hot_token_ids == ["token-1"]
         assert client.primed_token_ids == ["token-1"]
         assert intents[0].market_snapshot is client.snapshot
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_uses_sidecar_hot_wallet_batch_before_python_polling() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _SidecarHotScanPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="sidecar-hot",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert client.sidecar_scan_calls == 1
+        assert len(intents) == 1
+        assert intents[0].external_trade_id == "sidecar-trade-1"
+        assert intents[0].market_id == "market-sidecar"
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_writes_shadow_audit_rows() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _ShadowHotScanPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="shadow-hot",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        original_shadow = settings.execution_sidecar_shadow_mode_enabled
+        try:
+            settings.execution_sidecar_shadow_mode_enabled = True
+            intents = await monitor.scan_for_fresh_trade_intents(session)
+        finally:
+            settings.execution_sidecar_shadow_mode_enabled = original_shadow
+
+        assert len(intents) == 1
+        rows = (await session.execute(select(ExecutionDecisionAudit))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].stage == "hot_wallet_scan"
+        assert rows[0].wallet_address == "0x1111111111111111111111111111111111111111"
+        assert rows[0].matched is True
+        assert rows[0].rust_signal_count == 1
+        assert rows[0].python_signal_count == 1
 
     asyncio.run(_run_with_session(_case))
 

@@ -164,3 +164,30 @@ class BotRuntimeState(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ExecutionDecisionAudit(Base):
+    __tablename__ = "execution_decision_audits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_trade_id: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    wallet_address: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    market_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    python_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rust_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    python_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rust_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    python_requested_price_cents: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rust_requested_price_cents: Mapped[float | None] = mapped_column(Float, nullable=True)
+    python_slippage_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rust_slippage_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    python_signal_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rust_signal_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overlap_signal_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    python_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rust_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_delta_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)

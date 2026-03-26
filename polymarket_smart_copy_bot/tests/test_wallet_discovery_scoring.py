@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
-from core.wallet_discovery import CandidateSeed, DiscoveryThresholds, WalletDiscovery
+from core.wallet_discovery import CandidateSeed, CopyabilityStats, DiscoveryThresholds, WalletDiscovery
 from models.models import Base
 from models.qualified_wallet import QualifiedWallet
 from utils.helpers import utc_now
@@ -67,6 +67,14 @@ def test_tradability_penalty_thresholds() -> None:
     assert WalletDiscovery._tradability_penalty((10, 4)) == 30.0
     assert WalletDiscovery._tradability_penalty((10, 6)) == 10.0
     assert WalletDiscovery._tradability_penalty((10, 8)) == 0.0
+
+
+def test_tradability_penalty_grows_for_uncopyable_reason_rates() -> None:
+    clean = CopyabilityStats(attempts=10, fills=8, no_orderbook=0, low_liquidity=0, price_moved=0, hard_slippage=0)
+    toxic = CopyabilityStats(attempts=10, fills=8, no_orderbook=4, low_liquidity=0, price_moved=3, hard_slippage=0)
+
+    assert WalletDiscovery._tradability_penalty(clean) == 0.0
+    assert WalletDiscovery._tradability_penalty(toxic) == 60.0
 
 
 def test_score_caps_avg_size_component() -> None:

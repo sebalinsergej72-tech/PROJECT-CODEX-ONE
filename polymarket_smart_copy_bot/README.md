@@ -64,9 +64,18 @@ Then enable it in `.env`:
 ```bash
 EXECUTION_SIDECAR_ENABLED=true
 EXECUTION_SIDECAR_BASE_URL=http://127.0.0.1:8787
+EXECUTION_SIDECAR_PUSH_ENABLED=true
+EXECUTION_SIDECAR_PUSH_HOST=127.0.0.1
+EXECUTION_SIDECAR_PUSH_PORT=8788
+EXECUTION_SIDECAR_HOT_MARKET_REGISTRY_ENABLED=true
+EXECUTION_SIDECAR_HOT_MARKET_TTL_SECONDS=300
+EXECUTION_SIDECAR_HOT_SIGNAL_INGEST_ENABLED=true
 EXECUTION_SIDECAR_MARKET_DATA_ENABLED=true
+EXECUTION_SIDECAR_EXECUTABLE_SNAPSHOT_ENABLED=true
 EXECUTION_SIDECAR_EXECUTION_PLAN_ENABLED=true
 EXECUTION_SIDECAR_FILL_RECONCILE_ENABLED=true
+EXECUTION_SIDECAR_SHADOW_MODE_ENABLED=false
+EXECUTION_SIDECAR_AUTHENTICATED_READS_ENABLED=true
 ```
 
 ## Required Environment Variables
@@ -133,6 +142,7 @@ After deploy, verify:
 ```
 
 - `GET /status` returns scheduler/trading runtime state.
+- `GET /decision_audits` returns recent Python/Rust parity audit rows.
 - `GET /trades` returns recent copied trades.
 - `GET /positions` returns open (or all) positions.
 - `GET /dashboard` returns a live web dashboard.
@@ -206,3 +216,4 @@ pytest -q
 - For live execution ensure token-level data mapping (`token_id`) is correct for markets being copied.
 - Validate dry-run behavior before switching to live mode.
 - The Rust sidecar is optional and currently used as a migration path for low-latency market-data and execution-plane logic. Python remains the primary control plane and fallback path.
+- Signed live order submission still remains in Python until order-builder parity is implemented and canary-tested in Rust.

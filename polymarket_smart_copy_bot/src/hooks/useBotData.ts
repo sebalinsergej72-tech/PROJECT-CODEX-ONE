@@ -15,7 +15,9 @@ export function useBotStatus(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-status"],
     queryFn: fetchStatus,
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 10000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }
@@ -24,7 +26,9 @@ export function useBotTrades(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-trades"],
     queryFn: () => fetchTrades(15),
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 10000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }
@@ -33,7 +37,9 @@ export function useBotPositions(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-positions"],
     queryFn: () => fetchPositions(50),
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 10000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }
@@ -42,7 +48,9 @@ export function useBotOpenOrders(refreshMs = 5000) {
   return useQuery({
     queryKey: ["bot-open-orders"],
     queryFn: () => fetchOpenOrders(25),
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 10000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }
@@ -51,7 +59,9 @@ export function usePortfolioHistory(hours = 168, refreshMs = 30000) {
   return useQuery({
     queryKey: ["bot-portfolio-history", hours],
     queryFn: () => fetchPortfolioHistory(hours),
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 60000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }
@@ -60,7 +70,9 @@ export function useLeaderboard(refreshMs = 15000) {
   return useQuery({
     queryKey: ["leaderboard"],
     queryFn: () => fetchLeaderboard(50),
-    refetchInterval: refreshMs,
+    refetchInterval: Math.max(refreshMs, 60000),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     retry: 1,
   });
 }

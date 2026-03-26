@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 
+from config.settings import settings
 from data.polymarket_client import OrderRequest, PolymarketClient
 
 
@@ -120,3 +124,45 @@ def test_place_order_sync_rejects_invalid_low_price() -> None:
 
     assert fake.market_order_args is None
     assert fake.limit_order_args is None
+
+
+def test_fetch_open_orders_prefers_sidecar_authenticated_reads(monkeypatch) -> None:
+    class _FakeSidecar:
+        async def fetch_open_orders(self, *, market_id=None, token_id=None):
+            assert market_id == "market-1"
+            assert token_id == "token-1"
+            return [
+                {
+                    "id": "ord-1",
+                    "market": "market-1",
+                    "asset_id": "token-1",
+                    "side": "buy",
+                    "price": "0.61",
+                    "size": "10",
+                    "createdAt": datetime(2026, 3, 26, tzinfo=timezone.utc).isoformat(),
+                }
+            ]
+
+    async def _case() -> None:
+        client = PolymarketClient()
+        client._dry_run = False
+        client._execution_sidecar = _FakeSidecar()
+        client._fetch_open_orders_sync = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python path should not run"))  # type: ignore[method-assign]
+
+        original_sidecar = settings.execution_sidecar_enabled
+        original_reads = settings.execution_sidecar_authenticated_reads_enabled
+        original_key = settings.polymarket_private_key
+        try:
+            settings.execution_sidecar_enabled = True
+            settings.execution_sidecar_authenticated_reads_enabled = True
+            settings.polymarket_private_key = "0xabc"
+            rows = await client.fetch_open_orders(market_id="market-1", token_id="token-1")
+            assert rows is not None
+            assert len(rows) == 1
+            assert rows[0].order_id == "ord-1"
+        finally:
+            settings.execution_sidecar_enabled = original_sidecar
+            settings.execution_sidecar_authenticated_reads_enabled = original_reads
+            settings.polymarket_private_key = original_key
+
+    asyncio.run(_case())

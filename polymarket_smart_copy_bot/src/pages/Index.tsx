@@ -15,6 +15,16 @@ import { useBotOpenOrders, useBotPositions, useBotStatus, useBotTrades } from "@
 
 const Index = () => {
   const qc = useQueryClient();
+  const refreshDashboard = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["bot-status"] }),
+      qc.invalidateQueries({ queryKey: ["bot-trades"] }),
+      qc.invalidateQueries({ queryKey: ["bot-positions"] }),
+      qc.invalidateQueries({ queryKey: ["bot-open-orders"] }),
+      qc.invalidateQueries({ queryKey: ["bot-portfolio-history"] }),
+      qc.invalidateQueries({ queryKey: ["leaderboard"] }),
+    ]);
+  };
   const {
     data: status,
     isLoading: statusLoading,
@@ -51,7 +61,7 @@ const Index = () => {
           <div className="flex items-center gap-3">
             <span className="font-mono text-xs text-muted-foreground">Updated: {lastUpdate}</span>
             <button
-              onClick={() => qc.invalidateQueries()}
+              onClick={() => void refreshDashboard()}
               className="flex items-center gap-1.5 rounded-lg border border-border bg-secondary/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:border-primary/30 hover:text-foreground"
             >
               <RefreshCw className="h-3 w-3" />

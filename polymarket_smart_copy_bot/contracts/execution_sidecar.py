@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -21,6 +23,66 @@ class SidecarPrimeMarketDataRequest(BaseModel):
 
 class SidecarPrimeMarketDataResponse(BaseModel):
     snapshots: dict[str, SidecarOrderbookSnapshot | None] = Field(default_factory=dict)
+
+
+class SidecarExecutableSnapshot(BaseModel):
+    best_bid: float | None = None
+    best_ask: float | None = None
+    buy_vwap_5usd: float | None = None
+    buy_vwap_10usd: float | None = None
+    buy_vwap_25usd: float | None = None
+    sell_vwap_5usd: float | None = None
+    sell_vwap_10usd: float | None = None
+    sell_vwap_25usd: float | None = None
+    top5_ask_liquidity_usd: float = 0.0
+    top5_bid_liquidity_usd: float = 0.0
+    has_book: bool = False
+    last_update_ts: float | None = None
+    snapshot_age_ms: int | None = None
+
+
+class SidecarPrimeExecutableMarketDataResponse(BaseModel):
+    snapshots: dict[str, SidecarExecutableSnapshot | None] = Field(default_factory=dict)
+
+
+class SidecarRegisterHotMarketsRequest(BaseModel):
+    token_ids: list[str] = Field(default_factory=list)
+    ttl_seconds: int | None = None
+    source: str | None = None
+    priority: int | None = None
+
+
+class SidecarRegisterHotMarketsResponse(BaseModel):
+    accepted: int = 0
+
+
+class SidecarWalletScanTarget(BaseModel):
+    wallet_address: str
+
+
+class SidecarWalletSignalRow(BaseModel):
+    external_trade_id: str
+    wallet_address: str
+    market_id: str
+    token_id: str | None = None
+    outcome: str
+    side: str
+    price_cents: float
+    size_usd: float
+    traded_at_ts: float
+    profit_usd: float | None = None
+    market_slug: str | None = None
+    market_category: str | None = None
+
+
+class SidecarHotWalletScanRequest(BaseModel):
+    wallets: list[SidecarWalletScanTarget] = Field(default_factory=list)
+    signal_limit: int = 30
+    hot_market_ttl_seconds: int | None = None
+
+
+class SidecarHotWalletScanResponse(BaseModel):
+    signals: dict[str, list[SidecarWalletSignalRow]] = Field(default_factory=dict)
 
 
 class SidecarOrderRequest(BaseModel):
@@ -88,3 +150,15 @@ class SidecarFillReconcileResponse(BaseModel):
     delta_price_cents: float
     latest_fill_ts: float | None = None
     order_open: bool | None = None
+
+
+class SidecarAuthenticatedOpenOrdersResponse(BaseModel):
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SidecarAuthenticatedOrderStatusResponse(BaseModel):
+    payload: dict[str, Any] | None = None
+
+
+class SidecarAuthenticatedFillsResponse(BaseModel):
+    rows: list[dict[str, Any]] = Field(default_factory=list)

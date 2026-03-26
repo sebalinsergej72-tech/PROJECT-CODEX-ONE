@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -244,5 +245,56 @@ def test_get_status_prefers_polymarket_positions_count_for_open_positions() -> N
         payload = await BackgroundOrchestrator.get_status(orchestrator)
 
         assert payload["open_positions"] == 8
+
+    asyncio.run(_case())
+
+
+def test_get_status_uses_in_memory_snapshot_without_db_refresh() -> None:
+    async def _case() -> None:
+        orchestrator = BackgroundOrchestrator.__new__(BackgroundOrchestrator)
+        orchestrator._dry_run = False
+        orchestrator._risk_mode = "aggressive"
+        orchestrator._price_filter_enabled = False
+        orchestrator._high_conviction_boost_enabled = True
+        orchestrator._discovery_autoadd_enabled = True
+        orchestrator._trading_enabled = True
+        orchestrator.scheduler = type("Scheduler", (), {"running": True, "get_jobs": lambda self: []})()
+        orchestrator._tracked_wallets_count = 3
+        orchestrator._last_portfolio_state = type(
+            "State",
+            (),
+            {
+                "open_positions": 2,
+                "total_equity_usd": 10.0,
+                "positions_value_usd": 2.0,
+                "exposure_usd": 2.0,
+                "available_cash_usd": 8.0,
+                "open_order_reserve_usd": 0.0,
+                "daily_pnl_usd": 0.0,
+                "daily_drawdown_pct": 0.0,
+                "cumulative_pnl_usd": 0.0,
+            },
+        )()
+        orchestrator._last_exchange_balances = {}
+        orchestrator._live_started_at = None
+        orchestrator.last_wallet_refresh_at = None
+        orchestrator.last_trade_scan_at = None
+        orchestrator.last_trade_reconcile_at = None
+        orchestrator.last_portfolio_refresh_at = None
+        orchestrator.last_capital_recalc_at = None
+        orchestrator.last_stale_order_cleanup_at = None
+        orchestrator._last_stale_order_cleanup = {}
+        orchestrator.wallet_discovery = type("WD", (), {"last_result": None})()
+        orchestrator._refresh_portfolio_state_from_db = AsyncMock()
+        orchestrator._get_seed_wallets_stats = AsyncMock(return_value={"total": 99})
+        orchestrator._last_seed_wallet_stats_at = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+        orchestrator._cached_seed_wallet_stats = {"total": 1}
+        orchestrator._iso = BackgroundOrchestrator._iso
+
+        await BackgroundOrchestrator.get_status(orchestrator)
+        await BackgroundOrchestrator.get_status(orchestrator)
+
+        assert orchestrator._refresh_portfolio_state_from_db.await_count == 0
+        assert orchestrator._get_seed_wallets_stats.await_count == 0
 
     asyncio.run(_case())
