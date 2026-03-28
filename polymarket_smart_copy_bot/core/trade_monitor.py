@@ -106,6 +106,8 @@ class TradeMonitor:
         existing_ids = await self._fetch_existing_trade_ids(session)
         cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
         recent_buy_locks = await self._fetch_recent_buy_locks(session)
+        wallet_failure_cooldowns = await self._fetch_wallet_failure_cooldowns(session, scan_wallets)
+        wallet_recent_buy_counts = await self._fetch_wallet_recent_buy_counts(session, scan_wallets)
         sellable_positions = await self._fetch_local_sellable_positions(session)
         intents: list[TradeIntent] = []
         fetched_trade_batches = await self._fetch_fresh_wallet_trade_batches(session, scan_wallets)
@@ -126,6 +128,8 @@ class TradeMonitor:
                 cooldown_markets=cooldown_markets,
                 cooldown_tokens=cooldown_tokens,
                 recent_buy_locks=recent_buy_locks,
+                wallet_failure_cooldowns=wallet_failure_cooldowns,
+                wallet_recent_buy_counts=wallet_recent_buy_counts,
                 sellable_positions=sellable_positions,
                 price_filter_enabled=self._price_filter_provider(),
                 short_term_enabled=self._short_term_provider(),
@@ -513,6 +517,64 @@ class TradeMonitor:
         return locks
 
     @staticmethod
+    async def _fetch_wallet_recent_buy_counts(
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+    ) -> dict[str, int]:
+        window_minutes = max(0, settings.wallet_burst_window_minutes)
+        if window_minutes <= 0 or not wallets:
+            return {}
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
+        wallet_addresses = [wallet.address.lower() for wallet in wallets]
+        query = select(CopiedTrade).where(
+            CopiedTrade.wallet_address.in_(wallet_addresses),
+            CopiedTrade.side == TradeSide.BUY.value,
+            CopiedTrade.copied_at >= cutoff,
+        )
+        rows = (await session.execute(query)).scalars().all()
+        counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            counts[row.wallet_address.lower()] += 1
+        return dict(counts)
+
+    @staticmethod
+    async def _fetch_wallet_failure_cooldowns(
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+    ) -> set[str]:
+        cooldown_hours = max(0, settings.wallet_failure_cooldown_hours)
+        lookback_trades = max(1, settings.wallet_failure_cooldown_lookback_trades)
+        failure_threshold = max(1, settings.wallet_failure_cooldown_failure_threshold)
+        if cooldown_hours <= 0 or not wallets:
+            return set()
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=cooldown_hours)
+        wallet_addresses = [wallet.address.lower() for wallet in wallets]
+        query = select(CopiedTrade).where(
+            CopiedTrade.wallet_address.in_(wallet_addresses),
+            CopiedTrade.side == TradeSide.BUY.value,
+            CopiedTrade.copied_at >= cutoff,
+            CopiedTrade.status != TradeStatus.PENDING.value,
+        ).order_by(CopiedTrade.wallet_address.asc(), CopiedTrade.copied_at.desc())
+        rows = (await session.execute(query)).scalars().all()
+        grouped: dict[str, list[CopiedTrade]] = defaultdict(list)
+        for row in rows:
+            address = row.wallet_address.lower()
+            bucket = grouped[address]
+            if len(bucket) < lookback_trades:
+                bucket.append(row)
+
+        cooled: set[str] = set()
+        for address, recent_rows in grouped.items():
+            if len(recent_rows) < lookback_trades:
+                continue
+            failures = sum(1 for row in recent_rows if TradeMonitor._is_wallet_copyability_failure(row))
+            if failures >= failure_threshold:
+                cooled.add(address)
+        return cooled
+
+    @staticmethod
     async def _fetch_local_open_positions(
         session: AsyncSession,
     ) -> dict[str, list[Position]]:
@@ -553,11 +615,18 @@ class TradeMonitor:
         cooldown_markets: set[str],
         cooldown_tokens: set[str],
         recent_buy_locks: set[str],
+        wallet_failure_cooldowns: set[str],
+        wallet_recent_buy_counts: dict[str, int],
         sellable_positions: dict[str, Position],
         price_filter_enabled: bool,
         short_term_enabled: bool,
     ) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
+        wallet_key = wallet.address.lower()
+        if wallet_key in wallet_failure_cooldowns:
+            return intents
+
+        wallet_buy_count = int(wallet_recent_buy_counts.get(wallet_key, 0) or 0)
         normalized_signals = TradeMonitor._aggregate_signals(signals, existing_ids=existing_ids)
 
         for signal in normalized_signals:
@@ -573,6 +642,8 @@ class TradeMonitor:
 
             buy_lock_key = ""
             if signal.side.lower() == TradeSide.BUY.value:
+                if wallet_buy_count >= max(1, settings.wallet_burst_max_buy_intents):
+                    continue
                 buy_lock_key = TradeMonitor._buy_lock_key(
                     wallet_address=signal.wallet_address,
                     market_id=signal.market_id,
@@ -620,6 +691,7 @@ class TradeMonitor:
             )
             if buy_lock_key:
                 recent_buy_locks.add(buy_lock_key)
+                wallet_buy_count += 1
 
             if len(intents) >= TradeMonitor.MAX_INTENTS_PER_WALLET:
                 break
@@ -847,6 +919,15 @@ class TradeMonitor:
         if copied_at.tzinfo is None:
             copied_at = copied_at.replace(tzinfo=timezone.utc)
         return copied_at >= now - timedelta(minutes=cooldown_minutes)
+
+    @staticmethod
+    def _is_wallet_copyability_failure(trade: CopiedTrade) -> bool:
+        reason = (trade.reason or "").strip().lower()
+        return (
+            reason == "no_orderbook"
+            or reason.startswith("low_liquidity:")
+            or reason.startswith("price_moved:")
+        )
 
     @staticmethod
     def _should_lock_repeat_buy(trade: CopiedTrade) -> bool:

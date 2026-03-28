@@ -175,6 +175,26 @@ class Settings(BaseSettings):
         default=120,
         alias="REPEAT_BUY_COOLDOWN_SECONDS",
     )
+    wallet_burst_window_minutes: int = Field(
+        default=30,
+        alias="WALLET_BURST_WINDOW_MINUTES",
+    )
+    wallet_burst_max_buy_intents: int = Field(
+        default=3,
+        alias="WALLET_BURST_MAX_BUY_INTENTS",
+    )
+    wallet_failure_cooldown_hours: int = Field(
+        default=2,
+        alias="WALLET_FAILURE_COOLDOWN_HOURS",
+    )
+    wallet_failure_cooldown_lookback_trades: int = Field(
+        default=10,
+        alias="WALLET_FAILURE_COOLDOWN_LOOKBACK_TRADES",
+    )
+    wallet_failure_cooldown_failure_threshold: int = Field(
+        default=7,
+        alias="WALLET_FAILURE_COOLDOWN_FAILURE_THRESHOLD",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")

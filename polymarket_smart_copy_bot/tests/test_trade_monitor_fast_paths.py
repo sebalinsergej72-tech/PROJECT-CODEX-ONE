@@ -376,6 +376,8 @@ def test_signals_to_intents_only_keeps_first_repeat_buy_in_same_scan() -> None:
         cooldown_markets=set(),
         cooldown_tokens=set(),
         recent_buy_locks=set(),
+        wallet_failure_cooldowns=set(),
+        wallet_recent_buy_counts={},
         sellable_positions={},
         price_filter_enabled=False,
         short_term_enabled=True,
@@ -475,6 +477,120 @@ def test_fast_trade_scan_prioritizes_hot_wallets_each_cycle() -> None:
             settings.trade_monitor_hot_wallet_target = original_hot_target
             settings.trade_monitor_cold_wallet_batch_size = original_cold_batch_size
             settings.trade_monitor_hot_trade_freshness_hours = original_hot_freshness
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_skips_wallet_on_copyability_failure_cooldown() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="cooldown-wallet",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        now = utc_now()
+        for idx in range(7):
+            session.add(
+                CopiedTrade(
+                    external_trade_id=f"fail-{idx}",
+                    wallet_address=wallet_address,
+                    market_id=f"market-{idx}",
+                    token_id=f"token-{idx}",
+                    outcome="Yes",
+                    side="buy",
+                    price_cents=55.0,
+                    size_usd=12.0,
+                    status=TradeStatus.SKIPPED.value,
+                    reason="price_moved:50.0%",
+                    copied_at=now - timedelta(minutes=idx),
+                )
+            )
+        for idx in range(3):
+            session.add(
+                CopiedTrade(
+                    external_trade_id=f"ok-{idx}",
+                    wallet_address=wallet_address,
+                    market_id=f"market-ok-{idx}",
+                    token_id=f"token-ok-{idx}",
+                    outcome="Yes",
+                    side="buy",
+                    price_cents=55.0,
+                    size_usd=12.0,
+                    status=TradeStatus.FILLED.value,
+                    copied_at=now - timedelta(minutes=10 + idx),
+                    filled_at=now - timedelta(minutes=10 + idx),
+                )
+            )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_caps_wallet_buy_burst_in_window() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="burst-cap-wallet",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        now = utc_now()
+        for idx in range(3):
+            session.add(
+                CopiedTrade(
+                    external_trade_id=f"recent-buy-{idx}",
+                    wallet_address=wallet_address,
+                    market_id=f"recent-market-{idx}",
+                    token_id=f"recent-token-{idx}",
+                    outcome="Yes",
+                    side="buy",
+                    price_cents=55.0,
+                    size_usd=12.0,
+                    status=TradeStatus.SKIPPED.value,
+                    reason="low_liquidity:0.00<10.00",
+                    copied_at=now - timedelta(minutes=5 + idx),
+                )
+            )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
 
     asyncio.run(_run_with_session(_case))
 
