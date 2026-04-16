@@ -1,0 +1,16 @@
+{
+  "name": "tg-sales-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram-native AI sales agent MVP with managed bot provisioning, lead capture, handoff, and admin UI.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "seed:olga-clinic": "node scripts/seed_olga_clinic_bot.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
