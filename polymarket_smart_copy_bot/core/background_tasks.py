@@ -652,16 +652,21 @@ class BackgroundOrchestrator:
             size_matched = float(order_data.get("size_matched", 0) or order_data.get("sizeMatched", 0) or 0)
             original_size = float(order_data.get("original_size", 0) or order_data.get("originalSize", 0) or trade.size_usd or 0)
             price = float(order_data.get("price", 0) or 0)
+            from utils.helpers import ensure_price_in_cents
+
+            fill_price_cents = ensure_price_in_cents(price) if price > 0 else float(trade.filled_price_cents or trade.price_cents or 0.0)
+            matched_size_usd = (
+                round(size_matched * fill_price_cents / 100.0, 4)
+                if size_matched > 0 and fill_price_cents > 0
+                else 0.0
+            )
 
             if order_status in ("MATCHED", "FILLED", "CLOSED"):
                 trade.status = TradeStatus.FILLED.value
                 trade.filled_at = now
-                trade.filled_size_usd = size_matched if size_matched > 0 else trade.size_usd
-                if price > 0:
-                    from utils.helpers import ensure_price_in_cents
-                    trade.filled_price_cents = ensure_price_in_cents(price)
-                else:
-                    trade.filled_price_cents = trade.price_cents
+                trade.filled_quantity = round(size_matched, 8) if size_matched > 0 else trade.filled_quantity
+                trade.filled_size_usd = matched_size_usd if matched_size_usd > 0 else trade.size_usd
+                trade.filled_price_cents = fill_price_cents if fill_price_cents > 0 else trade.price_cents
 
                 # Calculate slippage
                 if trade.price_cents and trade.price_cents > 0 and trade.filled_price_cents:
@@ -716,8 +721,13 @@ class BackgroundOrchestrator:
 
             elif size_matched > 0 and original_size > 0 and size_matched < original_size:
                 trade.status = TradeStatus.PARTIAL.value
-                trade.filled_size_usd = size_matched
-                trade.reason = f"{trade.reason or ''} | partial ({size_matched:.2f}/{original_size:.2f})"
+                trade.filled_quantity = round(size_matched, 8)
+                trade.filled_size_usd = matched_size_usd
+                trade.filled_price_cents = fill_price_cents if fill_price_cents > 0 else trade.price_cents
+                trade.reason = (
+                    f"{trade.reason or ''} | partial "
+                    f"(${matched_size_usd:.2f}, {size_matched:.2f}/{original_size:.2f} shares)"
+                )
             elif await self.trade_executor.maybe_reprice_submitted_gtc_buy(copied_trade=trade, now=now):
                 logger.info("Repriced live BUY order for trade {}", trade.external_trade_id)
 

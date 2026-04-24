@@ -143,9 +143,29 @@ class RiskManager:
         remaining_wallet_capacity = per_wallet_cap - wallet_current_exposure_usd
         remaining_total_capacity = total_exposure_cap - portfolio.exposure_usd
         if remaining_wallet_capacity <= 0:
-            return RiskDecision(False, "wallet_exposure_limit", 0.0, False)
+            return RiskDecision(
+                False,
+                (
+                    "wallet_exposure_limit"
+                    f":exposure={wallet_current_exposure_usd:.2f}"
+                    f":cap={per_wallet_cap:.2f}"
+                    f":cash={portfolio.available_cash_usd:.2f}"
+                ),
+                0.0,
+                False,
+            )
         if remaining_total_capacity <= 0:
-            return RiskDecision(False, "total_exposure_limit", 0.0, False)
+            return RiskDecision(
+                False,
+                (
+                    "total_exposure_limit"
+                    f":exposure={portfolio.exposure_usd:.2f}"
+                    f":cap={total_exposure_cap:.2f}"
+                    f":cash={portfolio.available_cash_usd:.2f}"
+                ),
+                0.0,
+                False,
+            )
 
         wallet_multiplier = 0.8 + min(max(wallet_score, 0.0), 1.5) * 0.6
         if (
@@ -206,9 +226,29 @@ class RiskManager:
         remaining_wallet = per_wallet_cap - wallet_current_exposure_usd
         remaining_exposure = exposure_cap - portfolio.exposure_usd
         if remaining_wallet <= 0:
-            return RiskDecision(False, "wallet_exposure_limit", 0.0, False)
+            return RiskDecision(
+                False,
+                (
+                    "wallet_exposure_limit"
+                    f":exposure={wallet_current_exposure_usd:.2f}"
+                    f":cap={per_wallet_cap:.2f}"
+                    f":cash={portfolio.available_cash_usd:.2f}"
+                ),
+                0.0,
+                False,
+            )
         if remaining_exposure <= 0:
-            return RiskDecision(False, "total_exposure_limit", 0.0, False)
+            return RiskDecision(
+                False,
+                (
+                    "total_exposure_limit"
+                    f":exposure={portfolio.exposure_usd:.2f}"
+                    f":cap={exposure_cap:.2f}"
+                    f":cash={portfolio.available_cash_usd:.2f}"
+                ),
+                0.0,
+                False,
+            )
 
         target_size = min(
             source_size_usd * 0.15,

@@ -164,6 +164,27 @@ class _WarmSnapshotPolymarketClient(_DummyPolymarketClient):
         return None
 
 
+class _UnknownCategoryPolymarketClient(_DummyPolymarketClient):
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        self.trade_calls += 1
+        self.trade_limits.append(limit)
+        return [
+            WalletTradeSignal(
+                external_trade_id="unknown-category-trade",
+                wallet_address=wallet_address,
+                market_id="market-unknown",
+                token_id="token-unknown",
+                outcome="Yes",
+                side="buy",
+                price_cents=55.0,
+                size_usd=12.0,
+                traded_at=utc_now(),
+                market_slug="safe-market",
+                market_category=None,
+            )
+        ]
+
+
 class _SidecarHotScanPolymarketClient(_DummyPolymarketClient):
     def __init__(self) -> None:
         super().__init__()
@@ -377,6 +398,7 @@ def test_signals_to_intents_only_keeps_first_repeat_buy_in_same_scan() -> None:
         cooldown_tokens=set(),
         recent_buy_locks=set(),
         wallet_failure_cooldowns=set(),
+        wallet_uncopyable_pauses=set(),
         wallet_recent_buy_counts={},
         sellable_positions={},
         price_filter_enabled=False,
@@ -586,6 +608,91 @@ def test_fast_trade_scan_caps_wallet_buy_burst_in_window() -> None:
                     copied_at=now - timedelta(minutes=5 + idx),
                 )
             )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_pauses_uncopyable_wallet_with_zero_recent_fills() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = "0x1111111111111111111111111111111111111111"
+        session.add(
+            QualifiedWallet(
+                address=wallet_address,
+                name="uncopyable-wallet",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
+        now = utc_now()
+        original_min = settings.wallet_uncopyable_min_buy_intents
+        try:
+            settings.wallet_uncopyable_min_buy_intents = 4
+            for idx in range(4):
+                session.add(
+                    CopiedTrade(
+                        external_trade_id=f"uncopyable-{idx}",
+                        wallet_address=wallet_address,
+                        market_id=f"market-{idx}",
+                        token_id=f"token-{idx}",
+                        outcome="Yes",
+                        side="buy",
+                        price_cents=55.0,
+                        size_usd=12.0,
+                        status=TradeStatus.SKIPPED.value,
+                        reason="price_moved:50.0%",
+                        copied_at=now - timedelta(hours=idx),
+                    )
+                )
+            await session.flush()
+
+            intents = await monitor.scan_for_fresh_trade_intents(session)
+
+            assert intents == []
+        finally:
+            settings.wallet_uncopyable_min_buy_intents = original_min
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_blocks_unknown_category_buys() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _UnknownCategoryPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="unknown-category",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,politics",
+                enabled=True,
+            )
+        )
         await session.flush()
 
         intents = await monitor.scan_for_fresh_trade_intents(session)
@@ -1103,6 +1210,82 @@ def test_reconcile_scan_skips_dust_residual_positions() -> None:
         assert intents == []
         assert client.trade_calls == 0
         assert client.position_calls == 1
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_reconcile_scan_creates_take_profit_exit_intent() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = TradeMonitor.ACCOUNT_SYNC_WALLET
+        session.add(
+            Position(
+                wallet_address=wallet_address,
+                market_id="market-profit",
+                token_id="token-profit",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                quantity=10.0,
+                avg_price_cents=50.0,
+                current_price_cents=62.0,
+                invested_usd=5.0,
+                is_open=True,
+                opened_at=utc_now() - timedelta(minutes=30),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_reconcile_intents(session)
+
+        assert len(intents) == 1
+        assert intents[0].external_trade_id.startswith("take_profit:")
+        assert intents[0].side == TradeSide.SELL.value
+        assert intents[0].source_price_cents == 62.0
+        assert client.position_calls == 0
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_reconcile_scan_creates_stop_loss_exit_intent() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _DummyPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        wallet_address = TradeMonitor.ACCOUNT_SYNC_WALLET
+        session.add(
+            Position(
+                wallet_address=wallet_address,
+                market_id="market-loss",
+                token_id="token-loss",
+                outcome="Yes",
+                side=TradeSide.BUY.value,
+                quantity=10.0,
+                avg_price_cents=50.0,
+                current_price_cents=42.0,
+                invested_usd=5.0,
+                is_open=True,
+                opened_at=utc_now() - timedelta(minutes=30),
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_reconcile_intents(session)
+
+        assert len(intents) == 1
+        assert intents[0].external_trade_id.startswith("stop_loss:")
+        assert intents[0].side == TradeSide.SELL.value
+        assert intents[0].source_price_cents == 42.0
+        assert client.position_calls == 0
 
     asyncio.run(_run_with_session(_case))
 

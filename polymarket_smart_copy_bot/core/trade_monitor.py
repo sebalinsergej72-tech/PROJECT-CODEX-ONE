@@ -107,6 +107,7 @@ class TradeMonitor:
         cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
         recent_buy_locks = await self._fetch_recent_buy_locks(session)
         wallet_failure_cooldowns = await self._fetch_wallet_failure_cooldowns(session, scan_wallets)
+        wallet_uncopyable_pauses = await self._fetch_uncopyable_wallet_pauses(session, scan_wallets)
         wallet_recent_buy_counts = await self._fetch_wallet_recent_buy_counts(session, scan_wallets)
         sellable_positions = await self._fetch_local_sellable_positions(session)
         intents: list[TradeIntent] = []
@@ -129,6 +130,7 @@ class TradeMonitor:
                 cooldown_tokens=cooldown_tokens,
                 recent_buy_locks=recent_buy_locks,
                 wallet_failure_cooldowns=wallet_failure_cooldowns,
+                wallet_uncopyable_pauses=wallet_uncopyable_pauses,
                 wallet_recent_buy_counts=wallet_recent_buy_counts,
                 sellable_positions=sellable_positions,
                 price_filter_enabled=self._price_filter_provider(),
@@ -145,14 +147,19 @@ class TradeMonitor:
         qualified_wallets = await self._load_enabled_wallets(session, risk_mode=risk_mode)
         qualified_by_address = {wallet.address.lower(): wallet for wallet in qualified_wallets}
         local_open_by_wallet = await self._fetch_local_open_positions(session)
-        if not local_open_by_wallet and not qualified_by_address:
+        exit_positions = await self._fetch_exit_candidate_positions(session)
+        if not local_open_by_wallet and not qualified_by_address and not exit_positions:
             return []
 
         existing_ids = await self._fetch_existing_trade_ids(session)
         now = datetime.now(tz=timezone.utc)
         reconcile_cutoff = now - timedelta(minutes=2)
+        intents: list[TradeIntent] = self._build_profit_exit_intents(
+            local_open_positions=exit_positions,
+            existing_ids=existing_ids,
+            now=now,
+        )
         wallets_for_reconcile = sorted(set(local_open_by_wallet.keys()) | set(qualified_by_address.keys()))
-        intents: list[TradeIntent] = []
         position_tasks = [
             self.polymarket_client.fetch_wallet_open_positions(wallet_address, limit=200)
             for wallet_address in wallets_for_reconcile
@@ -575,6 +582,51 @@ class TradeMonitor:
         return cooled
 
     @staticmethod
+    async def _fetch_uncopyable_wallet_pauses(
+        session: AsyncSession,
+        wallets: list[QualifiedWallet],
+    ) -> set[str]:
+        if not settings.wallet_uncopyable_pause_enabled or not wallets:
+            return set()
+
+        lookback_days = max(1, settings.wallet_uncopyable_lookback_days)
+        min_buy_intents = max(1, settings.wallet_uncopyable_min_buy_intents)
+        max_fill_rate = max(float(settings.wallet_uncopyable_max_fill_rate_pct), 0.0) / 100.0
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+        wallet_addresses = [wallet.address.lower() for wallet in wallets]
+        query = select(CopiedTrade).where(
+            CopiedTrade.wallet_address.in_(wallet_addresses),
+            CopiedTrade.side == TradeSide.BUY.value,
+            CopiedTrade.copied_at >= cutoff,
+            CopiedTrade.status != TradeStatus.PENDING.value,
+        )
+        rows = (await session.execute(query)).scalars().all()
+
+        attempts: defaultdict[str, int] = defaultdict(int)
+        fills: defaultdict[str, int] = defaultdict(int)
+        for row in rows:
+            address = row.wallet_address.lower()
+            attempts[address] += 1
+            if row.status in {TradeStatus.FILLED.value, TradeStatus.PARTIAL.value} and (
+                float(row.filled_size_usd or 0.0) > 0 or float(row.filled_quantity or 0.0) > 0
+            ):
+                fills[address] += 1
+
+        paused: set[str] = set()
+        for address, attempt_count in attempts.items():
+            if attempt_count < min_buy_intents:
+                continue
+            fill_rate = fills[address] / attempt_count
+            if fill_rate <= max_fill_rate:
+                paused.add(address)
+        return paused
+
+    @staticmethod
+    async def _fetch_exit_candidate_positions(session: AsyncSession) -> list[Position]:
+        query = select(Position).where(Position.is_open.is_(True))
+        return list((await session.execute(query)).scalars().all())
+
+    @staticmethod
     async def _fetch_local_open_positions(
         session: AsyncSession,
     ) -> dict[str, list[Position]]:
@@ -616,6 +668,7 @@ class TradeMonitor:
         cooldown_tokens: set[str],
         recent_buy_locks: set[str],
         wallet_failure_cooldowns: set[str],
+        wallet_uncopyable_pauses: set[str],
         wallet_recent_buy_counts: dict[str, int],
         sellable_positions: dict[str, Position],
         price_filter_enabled: bool,
@@ -623,7 +676,7 @@ class TradeMonitor:
     ) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
         wallet_key = wallet.address.lower()
-        if wallet_key in wallet_failure_cooldowns:
+        if wallet_key in wallet_failure_cooldowns or wallet_key in wallet_uncopyable_pauses:
             return intents
 
         wallet_buy_count = int(wallet_recent_buy_counts.get(wallet_key, 0) or 0)
@@ -642,6 +695,8 @@ class TradeMonitor:
 
             buy_lock_key = ""
             if signal.side.lower() == TradeSide.BUY.value:
+                if settings.block_unknown_market_category and TradeMonitor._has_unknown_market_category(signal):
+                    continue
                 if wallet_buy_count >= max(1, settings.wallet_burst_max_buy_intents):
                     continue
                 buy_lock_key = TradeMonitor._buy_lock_key(
@@ -696,6 +751,74 @@ class TradeMonitor:
             if len(intents) >= TradeMonitor.MAX_INTENTS_PER_WALLET:
                 break
 
+        return intents
+
+    @classmethod
+    def _build_profit_exit_intents(
+        cls,
+        *,
+        local_open_positions: list[Position],
+        existing_ids: set[str],
+        now: datetime,
+    ) -> list[TradeIntent]:
+        intents: list[TradeIntent] = []
+        min_age = timedelta(minutes=max(0, settings.min_exit_position_age_minutes))
+        take_profit = max(float(settings.take_profit_exit_pct), 0.0)
+        stop_loss = max(float(settings.stop_loss_exit_pct), 0.0)
+        if take_profit <= 0 and stop_loss <= 0:
+            return intents
+
+        for local in local_open_positions:
+            opened_at = local.opened_at
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=timezone.utc)
+            if now - opened_at < min_age:
+                continue
+
+            avg_price = float(local.avg_price_cents or 0.0)
+            current_price = float(local.current_price_cents or 0.0)
+            if avg_price <= 0 or current_price <= 0:
+                continue
+
+            pnl_pct = (current_price - avg_price) / avg_price
+            if local.side == TradeSide.SELL.value:
+                pnl_pct *= -1
+
+            exit_kind: str | None = None
+            if take_profit > 0 and pnl_pct >= take_profit:
+                exit_kind = "take_profit"
+            elif stop_loss > 0 and pnl_pct <= -stop_loss:
+                exit_kind = "stop_loss"
+            if exit_kind is None:
+                continue
+
+            if cls._is_reconcile_position_residual_too_small(local, price_cents=current_price):
+                continue
+
+            opposite_side = TradeSide.SELL.value if local.side == TradeSide.BUY.value else TradeSide.BUY.value
+            external_trade_id = f"{exit_kind}:{local.wallet_address}:{local.id}:{int(now.timestamp() // 300)}"
+            if external_trade_id in existing_ids:
+                continue
+
+            intents.append(
+                TradeIntent(
+                    external_trade_id=external_trade_id,
+                    wallet_address=local.wallet_address,
+                    wallet_score=2000.0,
+                    wallet_win_rate=0.0,
+                    wallet_profit_factor=1.0,
+                    wallet_avg_position_size=0.0,
+                    market_id=local.market_id,
+                    token_id=local.token_id,
+                    outcome=local.outcome,
+                    side=opposite_side,
+                    source_price_cents=current_price,
+                    source_size_usd=0.0,
+                    is_short_term=False,
+                    market_slug=None,
+                    market_category=None,
+                )
+            )
         return intents
 
     @staticmethod
@@ -976,6 +1099,11 @@ class TradeMonitor:
             requested_size_usd = available_size_usd
         trimmed = min(available_size_usd, requested_size_usd)
         return trimmed < settings.min_trade_size_usd
+
+    @staticmethod
+    def _has_unknown_market_category(signal: WalletTradeSignal) -> bool:
+        category = (signal.market_category or "").strip().lower()
+        return category in {"", "unknown", "uncategorized", "other"}
 
     @staticmethod
     def _is_reconcile_position_residual_too_small(position: Position, *, price_cents: float) -> bool:

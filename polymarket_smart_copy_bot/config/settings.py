@@ -195,6 +195,38 @@ class Settings(BaseSettings):
         default=7,
         alias="WALLET_FAILURE_COOLDOWN_FAILURE_THRESHOLD",
     )
+    wallet_uncopyable_pause_enabled: bool = Field(
+        default=True,
+        alias="WALLET_UNCOPYABLE_PAUSE_ENABLED",
+    )
+    wallet_uncopyable_lookback_days: int = Field(
+        default=7,
+        alias="WALLET_UNCOPYABLE_LOOKBACK_DAYS",
+    )
+    wallet_uncopyable_min_buy_intents: int = Field(
+        default=100,
+        alias="WALLET_UNCOPYABLE_MIN_BUY_INTENTS",
+    )
+    wallet_uncopyable_max_fill_rate_pct: float = Field(
+        default=0.5,
+        alias="WALLET_UNCOPYABLE_MAX_FILL_RATE_PCT",
+    )
+    block_unknown_market_category: bool = Field(
+        default=True,
+        alias="BLOCK_UNKNOWN_MARKET_CATEGORY",
+    )
+    take_profit_exit_pct: float = Field(
+        default=0.18,
+        alias="TAKE_PROFIT_EXIT_PCT",
+    )
+    stop_loss_exit_pct: float = Field(
+        default=0.12,
+        alias="STOP_LOSS_EXIT_PCT",
+    )
+    min_exit_position_age_minutes: int = Field(
+        default=10,
+        alias="MIN_EXIT_POSITION_AGE_MINUTES",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
