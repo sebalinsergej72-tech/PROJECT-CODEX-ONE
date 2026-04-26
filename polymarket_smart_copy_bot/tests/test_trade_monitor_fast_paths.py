@@ -185,6 +185,27 @@ class _UnknownCategoryPolymarketClient(_DummyPolymarketClient):
         ]
 
 
+class _InferredSportsCategoryPolymarketClient(_DummyPolymarketClient):
+    async def fetch_wallet_trades(self, wallet_address: str, limit: int = 30) -> list[WalletTradeSignal]:
+        self.trade_calls += 1
+        self.trade_limits.append(limit)
+        return [
+            WalletTradeSignal(
+                external_trade_id="inferred-sports-trade",
+                wallet_address=wallet_address,
+                market_id="market-sports",
+                token_id="token-sports",
+                outcome="Over",
+                side="buy",
+                price_cents=50.0,
+                size_usd=12.0,
+                traded_at=utc_now(),
+                market_slug="nba-lal-hou-2026-04-26-total-205pt5",
+                market_category=None,
+            )
+        ]
+
+
 class _SidecarHotScanPolymarketClient(_DummyPolymarketClient):
     def __init__(self) -> None:
         super().__init__()
@@ -698,6 +719,39 @@ def test_fast_trade_scan_blocks_unknown_category_buys() -> None:
         intents = await monitor.scan_for_fresh_trade_intents(session)
 
         assert intents == []
+
+    asyncio.run(_run_with_session(_case))
+
+
+def test_fast_trade_scan_allows_inferred_sports_category_buys() -> None:
+    async def _case(session: AsyncSession) -> None:
+        client = _InferredSportsCategoryPolymarketClient()
+        monitor = TradeMonitor(
+            client,
+            risk_mode_provider=lambda: "aggressive",
+            price_filter_provider=lambda: False,
+            short_term_provider=lambda: True,
+        )
+        session.add(
+            QualifiedWallet(
+                address="0x1111111111111111111111111111111111111111",
+                name="inferred-sports",
+                score=100.0,
+                win_rate=0.7,
+                trades_90d=150,
+                profit_factor=2.0,
+                avg_size=1000.0,
+                niche="overall,sports",
+                enabled=True,
+            )
+        )
+        await session.flush()
+
+        intents = await monitor.scan_for_fresh_trade_intents(session)
+
+        assert len(intents) == 1
+        assert intents[0].external_trade_id == "inferred-sports-trade"
+        assert intents[0].market_category == "sports"
 
     asyncio.run(_run_with_session(_case))
 

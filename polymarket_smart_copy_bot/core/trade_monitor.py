@@ -68,6 +68,63 @@ class TradeMonitor:
         re.compile(r".*minute.*", re.IGNORECASE),
     )
     CATEGORY_BLACKLIST = {"short_term_crypto"}
+    CATEGORY_INFERENCE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "sports",
+            (
+                "nba-",
+                "nfl-",
+                "mlb-",
+                "nhl-",
+                "wnba-",
+                "mls-",
+                "epl-",
+                "uefa-",
+                "fifa-",
+                "atp-",
+                "wta-",
+                "ufc-",
+                "mma-",
+                "boxing-",
+                "tennis-",
+                "soccer-",
+                "basketball-",
+                "football-",
+                "baseball-",
+                "hockey-",
+            ),
+        ),
+        (
+            "crypto",
+            (
+                "bitcoin",
+                "btc",
+                "ethereum",
+                "eth",
+                "solana",
+                "sol",
+                "xrp",
+                "doge",
+                "crypto",
+                "binance",
+            ),
+        ),
+        (
+            "politics",
+            (
+                "trump",
+                "biden",
+                "election",
+                "president",
+                "senate",
+                "house",
+                "congress",
+                "democrat",
+                "republican",
+            ),
+        ),
+        ("finance", ("fed", "rates", "cpi", "inflation", "stock", "nasdaq", "sp500", "dow-")),
+    )
 
     def __init__(
         self,
@@ -741,7 +798,7 @@ class TradeMonitor:
                     source_size_usd=signal.size_usd,
                     is_short_term=is_short,
                     market_slug=signal.market_slug,
-                    market_category=signal.market_category,
+                    market_category=TradeMonitor._classify_market_category(signal),
                 )
             )
             if buy_lock_key:
@@ -1102,7 +1159,7 @@ class TradeMonitor:
 
     @staticmethod
     def _has_unknown_market_category(signal: WalletTradeSignal) -> bool:
-        category = (signal.market_category or "").strip().lower()
+        category = TradeMonitor._classify_market_category(signal)
         return category in {"", "unknown", "uncategorized", "other"}
 
     @staticmethod
@@ -1113,10 +1170,25 @@ class TradeMonitor:
 
     @classmethod
     def _is_market_tradeable(cls, *, signal: WalletTradeSignal, is_short_term: bool) -> bool:
-        category = (signal.market_category or "").strip().lower()
+        category = cls._classify_market_category(signal)
         slug = (signal.market_slug or signal.market_id or "").strip().lower()
         if category in cls.CATEGORY_BLACKLIST:
             return False
         if is_short_term and "crypto" in category:
             return False
         return not any(pattern.match(slug) for pattern in cls.MARKET_BLACKLIST_PATTERNS)
+
+    @classmethod
+    def _classify_market_category(cls, signal: WalletTradeSignal) -> str:
+        category = (signal.market_category or "").strip().lower()
+        if category and category not in {"unknown", "uncategorized", "other"}:
+            return category
+
+        text = f"{signal.market_slug or ''} {signal.outcome or ''}".strip().lower()
+        if not text:
+            return category
+
+        for inferred_category, markers in cls.CATEGORY_INFERENCE_PATTERNS:
+            if any(marker in text for marker in markers):
+                return inferred_category
+        return category
