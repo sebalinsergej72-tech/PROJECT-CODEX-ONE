@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TG Sales Agent</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-mark">TS</span>
+        <div>
+          <strong>TG Sales Agent</strong>
+          <small>AI-продавец в Telegram</small>
+        </div>
+      </div>
+      <nav>
+        <a href="#workspace" class="active">Рабочая область</a>
+        <a href="#knowledge">База знаний</a>
+        <a href="#leads">Лиды</a>
+        <a href="#simulator">Симулятор</a>
+      </nav>
+      <button id="createBusiness" class="ghost-button">Новый бизнес</button>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">MVP workspace</p>
+          <h1 id="businessTitle">Загрузка...</h1>
+        </div>
+        <div class="top-actions">
+          <select id="businessSelect" aria-label="Выбор бизнеса"></select>
+          <a id="newBotLink" class="primary-button" href="#" target="_blank" rel="noreferrer">Создать managed bot</a>
+        </div>
+      </header>
+
+      <section id="workspace" class="band metrics-band">
+        <article>
+          <span id="metricLeads">0</span>
+          <small>лидов</small>
+        </article>
+        <article>
+          <span id="metricHot">0</span>
+          <small>горячих</small>
+        </article>
+        <article>
+          <span id="metricDialogs">0</span>
+          <small>диалогов</small>
+        </article>
+        <article>
+          <span id="metricHandoffs">0</span>
+          <small>передач менеджеру</small>
+        </article>
+      </section>
+
+      <section class="panel manager-panel">
+        <div class="section-title">
+          <h2>Telegram manager bot</h2>
+          <p id="managerStatusText">Проверяем состояние manager-бота...</p>
+        </div>
+      </section>
+
+      <section class="grid two">
+        <form id="businessForm" class="panel">
+          <div class="section-title">
+            <h2>Настройки бизнеса</h2>
+            <p>Эти данные формируют поведение продавца и handoff.</p>
+          </div>
+          <label>
+            Название
+            <input name="name" autocomplete="organization" />
+          </label>
+          <label>
+            Ниша
+            <input name="niche" placeholder="cosmetology, courses, repair..." />
+          </label>
+          <label>
+            Адрес
+            <input name="address" placeholder="Город, улица, ориентир" />
+          </label>
+          <label>
+            Рабочие часы
+            <input name="workingHours" />
+          </label>
+          <label>
+            Telegram chat ID менеджера
+            <input name="managerChatId" placeholder="Например: 123456789" />
+          </label>
+          <label>
+            Google Sheets webhook
+            <input name="sheetWebhookUrl" placeholder="Apps Script URL" />
+          </label>
+          <label>
+            CRM webhook
+            <input name="crmWebhookUrl" placeholder="Любой POST endpoint" />
+          </label>
+          <label class="full">
+            Политика передачи человеку
+            <textarea name="handoffPolicy" rows="3"></textarea>
+          </label>
+          <button class="primary-button" type="submit">Сохранить настройки</button>
+        </form>
+
+        <section class="panel">
+          <div class="section-title">
+            <h2>Подключенные боты</h2>
+            <p>Managed bots, созданные через Telegram.</p>
+          </div>
+          <div id="botsList" class="list"></div>
+        </section>
+      </section>
+
+      <section id="knowledge" class="grid two">
+        <form id="knowledgeForm" class="panel">
+          <div class="section-title">
+            <h2>База знаний</h2>
+            <p>Одна строка FAQ: вопрос | ответ. Одна строка услуги: название | цена | описание.</p>
+          </div>
+          <label>
+            FAQ
+            <textarea name="faq" rows="8"></textarea>
+          </label>
+          <label>
+            Услуги и цены
+            <textarea name="catalog" rows="8"></textarea>
+          </label>
+          <button class="primary-button" type="submit">Обновить знания</button>
+        </form>
+
+        <section id="simulator" class="panel simulator">
+          <div class="section-title">
+            <h2>Симулятор диалога</h2>
+            <p>Проверьте ответы и скоринг до подключения реального бота.</p>
+          </div>
+          <div id="chatLog" class="chat-log"></div>
+          <form id="simulateForm" class="composer">
+            <input name="text" placeholder="Сообщение клиента" />
+            <button aria-label="Отправить" title="Отправить">→</button>
+          </form>
+        </section>
+      </section>
+
+      <section id="leads" class="panel wide">
+        <div class="section-title">
+          <h2>Лиды</h2>
+          <p>Скоринг, резюме и статус обработки.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Статус</th>
+                <th>Скоринг</th>
+                <th>Клиент</th>
+                <th>Интерес</th>
+                <th>Резюме</th>
+                <th>Обновлено</th>
+              </tr>
+            </thead>
+            <tbody id="leadsTable"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

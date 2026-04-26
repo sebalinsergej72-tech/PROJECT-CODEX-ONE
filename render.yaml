@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: tg-sales-agent
+    runtime: node
+    plan: starter
+    rootDir: services/tg-sales-agent
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TELEGRAM_POLLING
+        value: "false"

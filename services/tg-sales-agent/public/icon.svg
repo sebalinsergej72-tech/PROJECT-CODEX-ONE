@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="TG Sales Agent">
+  <rect width="64" height="64" rx="12" fill="#171c1a"/>
+  <path d="M16 20h32v8H36v24h-8V28H16z" fill="#dfb05a"/>
+  <path d="M42 36c0-4-3-7-8-7h-5v23h7v-7h2l4 7h8l-5-9c2-2 3-4 3-7zm-8 3h-1v-4h1c4 0 4 4 0 4z" fill="#f6f3ed"/>
+</svg>
