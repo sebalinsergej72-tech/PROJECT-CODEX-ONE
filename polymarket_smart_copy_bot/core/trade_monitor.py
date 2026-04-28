@@ -163,6 +163,7 @@ class TradeMonitor:
         existing_ids = await self._fetch_existing_trade_ids(session)
         cooldown_markets, cooldown_tokens = await self._fetch_market_cooldowns(session)
         recent_buy_locks = await self._fetch_recent_buy_locks(session)
+        recent_sell_locks = await self._fetch_recent_sell_exit_locks(session)
         wallet_failure_cooldowns = await self._fetch_wallet_failure_cooldowns(session, scan_wallets)
         wallet_uncopyable_pauses = await self._fetch_uncopyable_wallet_pauses(session, scan_wallets)
         wallet_recent_buy_counts = await self._fetch_wallet_recent_buy_counts(session, scan_wallets)
@@ -186,6 +187,7 @@ class TradeMonitor:
                 cooldown_markets=cooldown_markets,
                 cooldown_tokens=cooldown_tokens,
                 recent_buy_locks=recent_buy_locks,
+                recent_sell_locks=recent_sell_locks,
                 wallet_failure_cooldowns=wallet_failure_cooldowns,
                 wallet_uncopyable_pauses=wallet_uncopyable_pauses,
                 wallet_recent_buy_counts=wallet_recent_buy_counts,
@@ -209,11 +211,13 @@ class TradeMonitor:
             return []
 
         existing_ids = await self._fetch_existing_trade_ids(session)
+        recent_sell_locks = await self._fetch_recent_sell_exit_locks(session)
         now = datetime.now(tz=timezone.utc)
         reconcile_cutoff = now - timedelta(minutes=2)
         intents: list[TradeIntent] = self._build_profit_exit_intents(
             local_open_positions=exit_positions,
             existing_ids=existing_ids,
+            recent_sell_locks=recent_sell_locks,
             now=now,
         )
         wallets_for_reconcile = sorted(set(local_open_by_wallet.keys()) | set(qualified_by_address.keys()))
@@ -247,6 +251,7 @@ class TradeMonitor:
                 source_open_positions=pos_batch,
                 local_open_positions=local_open_by_wallet.get(wallet_address, []),
                 existing_ids=existing_ids,
+                recent_sell_locks=recent_sell_locks,
                 reconcile_cutoff=reconcile_cutoff,
                 now=now,
             )
@@ -581,6 +586,31 @@ class TradeMonitor:
         return locks
 
     @staticmethod
+    async def _fetch_recent_sell_exit_locks(session: AsyncSession) -> set[str]:
+        cooldown_minutes = max(0, settings.sell_exit_retry_cooldown_minutes)
+        if cooldown_minutes <= 0:
+            return set()
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=cooldown_minutes)
+        query = select(CopiedTrade).where(
+            CopiedTrade.side == TradeSide.SELL.value,
+            CopiedTrade.copied_at >= cutoff,
+            CopiedTrade.status.in_(
+                [
+                    TradeStatus.SKIPPED.value,
+                    TradeStatus.FAILED.value,
+                    TradeStatus.EXPIRED.value,
+                ]
+            ),
+        )
+        rows = (await session.execute(query)).scalars().all()
+        return {
+            TradeMonitor._position_key(row.market_id, row.token_id, row.outcome)
+            for row in rows
+            if TradeMonitor._is_failed_sell_exit(row)
+        }
+
+    @staticmethod
     async def _fetch_wallet_recent_buy_counts(
         session: AsyncSession,
         wallets: list[QualifiedWallet],
@@ -724,6 +754,7 @@ class TradeMonitor:
         cooldown_markets: set[str],
         cooldown_tokens: set[str],
         recent_buy_locks: set[str],
+        recent_sell_locks: set[str],
         wallet_failure_cooldowns: set[str],
         wallet_uncopyable_pauses: set[str],
         wallet_recent_buy_counts: dict[str, int],
@@ -768,6 +799,8 @@ class TradeMonitor:
             if signal.side.lower() == TradeSide.SELL.value:
                 sellable_position = TradeMonitor._matching_sellable_position(signal, sellable_positions)
                 if sellable_position is None:
+                    continue
+                if TradeMonitor._position_key(signal.market_id, signal.token_id, signal.outcome) in recent_sell_locks:
                     continue
                 if TradeMonitor._is_sell_signal_residual_too_small(signal, sellable_position):
                     continue
@@ -816,6 +849,7 @@ class TradeMonitor:
         *,
         local_open_positions: list[Position],
         existing_ids: set[str],
+        recent_sell_locks: set[str],
         now: datetime,
     ) -> list[TradeIntent]:
         intents: list[TradeIntent] = []
@@ -847,6 +881,12 @@ class TradeMonitor:
             elif stop_loss > 0 and pnl_pct <= -stop_loss:
                 exit_kind = "stop_loss"
             if exit_kind is None:
+                continue
+
+            position_key = cls._position_key(local.market_id, local.token_id, local.outcome)
+            if position_key in recent_sell_locks:
+                continue
+            if exit_kind == "take_profit" and cls._is_terminal_profit_position(local, price_cents=current_price):
                 continue
 
             if cls._is_reconcile_position_residual_too_small(local, price_cents=current_price):
@@ -999,6 +1039,7 @@ class TradeMonitor:
         source_open_positions: list[WalletOpenPosition],
         local_open_positions: list[Position],
         existing_ids: set[str],
+        recent_sell_locks: set[str],
         reconcile_cutoff: datetime,
         now: datetime,
     ) -> list[TradeIntent]:
@@ -1024,10 +1065,14 @@ class TradeMonitor:
             local_key = cls._position_key(local.market_id, local.token_id, local.outcome)
             if local_key in source_keys:
                 continue
+            if local_key in recent_sell_locks:
+                continue
 
             opposite_side = TradeSide.SELL.value if local.side == TradeSide.BUY.value else TradeSide.BUY.value
             price_cents = local.current_price_cents if local.current_price_cents > 0 else local.avg_price_cents
             if price_cents <= 0:
+                continue
+            if cls._is_terminal_profit_position(local, price_cents=price_cents):
                 continue
             if cls._is_reconcile_position_residual_too_small(local, price_cents=price_cents):
                 continue
@@ -1108,6 +1153,32 @@ class TradeMonitor:
             or reason.startswith("low_liquidity:")
             or reason.startswith("price_moved:")
         )
+
+    @staticmethod
+    def _is_failed_sell_exit(trade: CopiedTrade) -> bool:
+        reason = (trade.reason or "").strip().lower()
+        status = (trade.status or "").strip().lower()
+        if status not in {TradeStatus.SKIPPED.value, TradeStatus.FAILED.value, TradeStatus.EXPIRED.value}:
+            return False
+        return (
+            reason == "slippage_above_hard_limit"
+            or reason == "insufficient_balance_allowance"
+            or reason == "orderbook_not_found"
+            or reason == "no_orderbook"
+            or reason.endswith("expired_ttl")
+            or reason.startswith("price_moved:")
+            or reason.startswith("low_liquidity:")
+        )
+
+    @staticmethod
+    def _is_terminal_profit_position(position: Position, *, price_cents: float) -> bool:
+        threshold = float(settings.terminal_profit_exit_hold_price_cents or 0.0)
+        if threshold <= 0:
+            return False
+        if position.side == TradeSide.BUY.value:
+            return price_cents >= threshold
+        terminal_low = max(0.0, 100.0 - threshold)
+        return price_cents <= terminal_low
 
     @staticmethod
     def _should_lock_repeat_buy(trade: CopiedTrade) -> bool:

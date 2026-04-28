@@ -227,6 +227,14 @@ class Settings(BaseSettings):
         default=10,
         alias="MIN_EXIT_POSITION_AGE_MINUTES",
     )
+    sell_exit_retry_cooldown_minutes: int = Field(
+        default=60,
+        alias="SELL_EXIT_RETRY_COOLDOWN_MINUTES",
+    )
+    terminal_profit_exit_hold_price_cents: float = Field(
+        default=99.0,
+        alias="TERMINAL_PROFIT_EXIT_HOLD_PRICE_CENTS",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")
