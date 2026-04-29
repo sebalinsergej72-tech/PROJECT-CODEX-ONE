@@ -1220,7 +1220,7 @@ class PolymarketClient:
         }
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
-        """Place an order through py-clob-client or simulate in DRY_RUN mode."""
+        """Place an order through py-clob-client-v2 or simulate in DRY_RUN mode."""
 
         if self._dry_run:
             simulated_id = f"dry-{int(datetime.now(tz=timezone.utc).timestamp())}"
@@ -1246,8 +1246,17 @@ class PolymarketClient:
 
         try:
             response = await asyncio.to_thread(self._place_order_sync, request)
+            if isinstance(response, dict) and response.get("success") is False:
+                error = response.get("errorMsg") or response.get("error") or response.get("message") or "order_rejected"
+                return OrderResult(success=False, order_id=None, tx_hash=None, error=str(error))
             order_id = str(response.get("orderID") or response.get("id") or "")
-            tx_hash = str(response.get("transactionHash") or response.get("txHash") or order_id)
+            tx_hashes = response.get("transactionsHashes") if isinstance(response, dict) else None
+            tx_hash = str(
+                response.get("transactionHash")
+                or response.get("txHash")
+                or (tx_hashes[0] if isinstance(tx_hashes, list) and tx_hashes else "")
+                or order_id
+            )
             return OrderResult(success=True, order_id=order_id or None, tx_hash=tx_hash or None)
         except Exception as exc:
             text = str(exc).lower()
@@ -1264,7 +1273,7 @@ class PolymarketClient:
                     tx_hash=None,
                     error=f"orderbook_not_found:{request.token_id}",
                 )
-            if "not enough balance / allowance" in text:
+            if "not enough balance / allowance" in text or "not_enough_balance" in text:
                 logger.warning("Insufficient balance/allowance for token_id={} market_id={}", request.token_id, request.market_id)
                 return OrderResult(
                     success=False,
@@ -1545,7 +1554,7 @@ class PolymarketClient:
             return {"ok": False, "code": code, "error": text}
 
     def _diagnose_live_credentials_sync(self) -> dict[str, Any]:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         clob_client = self._ensure_clob_client()
         response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
@@ -1553,7 +1562,7 @@ class PolymarketClient:
         signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
         builder = getattr(clob_client, "builder", None)
         funder_address = getattr(builder, "funder", None) if builder is not None else None
-        signature_type = getattr(builder, "sig_type", None) if builder is not None else None
+        signature_type = self._builder_signature_type(builder)
         return {
             "code": "ok",
             "collateral_balance_usd": balance,
@@ -1565,7 +1574,7 @@ class PolymarketClient:
         }
 
     def _diagnose_with_derived_retry_sync(self) -> dict[str, Any]:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         clob_client = self._ensure_clob_client()
         self._switch_to_derived_creds(clob_client)
@@ -1574,7 +1583,7 @@ class PolymarketClient:
         signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
         builder = getattr(clob_client, "builder", None)
         funder_address = getattr(builder, "funder", None) if builder is not None else None
-        signature_type = getattr(builder, "sig_type", None) if builder is not None else None
+        signature_type = self._builder_signature_type(builder)
         return {
             "collateral_balance_usd": balance,
             "response_type": type(response).__name__,
@@ -1585,13 +1594,12 @@ class PolymarketClient:
         }
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import MarketOrderArgs, OrderArgs, OrderType
         import math
 
         clob_client = self._ensure_clob_client()
 
-        side = BUY if request.side.lower() == "buy" else SELL
+        side = "BUY" if request.side.lower() == "buy" else "SELL"
         price_decimal = self._validate_price(request.price_cents / 100.0)
         if price_decimal is None:
             raise ValueError("invalid_price")
@@ -1600,9 +1608,9 @@ class PolymarketClient:
         _order_type_map = {"FOK": OrderType.FOK, "IOC": OrderType.FAK, "FAK": OrderType.FAK}
         clob_order_type = _order_type_map.get(request.order_type, OrderType.GTC)
 
-        if side == BUY and clob_order_type != OrderType.GTC:
+        if side == "BUY" and clob_order_type != OrderType.GTC:
             # Use the market-order builder for taker-style BUYs so the signed
-            # maker amount stays in USDC terms with market-order precision.
+            # maker amount stays in pUSD terms with market-order precision.
             order_args = MarketOrderArgs(
                 token_id=request.token_id,
                 amount=round(max(request.size_usd, 0.01), 2),
@@ -1626,24 +1634,22 @@ class PolymarketClient:
         except Exception as exc:
             text = str(exc).lower()
             if "unauthorized" in text or "invalid api key" in text:
-                # Common operator error: Builder API creds provided instead of user L2 creds.
-                # Fall back to signer-derived user credentials and retry once.
                 self._switch_to_derived_creds(clob_client)
                 return clob_client.post_order(signed_order, clob_order_type)
-            if "not enough balance / allowance" in text:
+            if "not enough balance / allowance" in text or "not_enough_balance" in text:
                 self._refresh_collateral_allowance_sync()
                 return clob_client.post_order(signed_order, clob_order_type)
             raise
 
     def _fetch_open_orders_sync(self, market_id: str | None, token_id: str | None) -> list[dict[str, Any]]:
-        from py_clob_client.clob_types import OpenOrderParams
+        from py_clob_client_v2.clob_types import OpenOrderParams
 
         clob_client = self._ensure_clob_client()
         params = OpenOrderParams(
             market=market_id or None,
             asset_id=token_id or None,
         )
-        response = clob_client.get_orders(params=params)
+        response = clob_client.get_open_orders(params=params)
         if not isinstance(response, list):
             return []
         return [row for row in response if isinstance(row, dict)]
@@ -1660,7 +1666,7 @@ class PolymarketClient:
         token_id: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
 
         clob_client = self._ensure_clob_client()
         after_unix = int(after_ts.timestamp())
@@ -1677,10 +1683,12 @@ class PolymarketClient:
         return rows[:limit]
 
     def _cancel_order_sync(self, order_id: str) -> bool:
+        from py_clob_client_v2.clob_types import OrderPayload
+
         clob_client = self._ensure_clob_client()
         if not order_id:
             return False
-        response = clob_client.cancel(order_id)
+        response = clob_client.cancel_order(OrderPayload(orderID=order_id))
         if isinstance(response, dict):
             if str(response.get("canceled", "")).lower() == "true":
                 return True
@@ -1722,7 +1730,7 @@ class PolymarketClient:
         return None
 
     def _fetch_account_balance_sync(self) -> float | None:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         # `get_balance_allowance` response schema can vary between API versions.
         clob_client = self._ensure_clob_client()
@@ -1734,23 +1742,24 @@ class PolymarketClient:
         return None
 
     def _ensure_clob_client(self) -> Any:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds
-        from py_order_utils.model import EOA, POLY_PROXY
+        from py_clob_client_v2.client import ClobClient
+        from py_clob_client_v2.clob_types import ApiCreds
+        from py_clob_client_v2.order_utils.model.signature_type_v2 import SignatureTypeV2
 
         if self._clob_client is not None:
             return self._clob_client
 
         signature_type = settings.polymarket_signature_type
         if signature_type is None:
-            signature_type = POLY_PROXY if settings.polymarket_proxy_address else EOA
+            signature_type = SignatureTypeV2.POLY_PROXY if settings.polymarket_proxy_address else SignatureTypeV2.EOA
 
         self._clob_client = ClobClient(
-            settings.polymarket_host,
+            host=settings.polymarket_host,
             key=settings.polymarket_private_key,
             chain_id=settings.polymarket_chain_id,
             signature_type=signature_type,
             funder=settings.polymarket_proxy_address or None,
+            retry_on_error=True,
         )
         if (
             settings.polymarket_api_key
@@ -1770,7 +1779,7 @@ class PolymarketClient:
         return self._clob_client
 
     def _refresh_collateral_allowance_sync(self) -> None:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         try:
             clob_client = self._ensure_clob_client()
@@ -1780,11 +1789,25 @@ class PolymarketClient:
             logger.warning("Failed to refresh collateral allowance: {}", exc)
 
     def _switch_to_derived_creds(self, clob_client: Any) -> None:
-        creds = clob_client.create_or_derive_api_creds()
+        if hasattr(clob_client, "derive_api_key"):
+            try:
+                creds = clob_client.derive_api_key()
+            except Exception:
+                creds = clob_client.create_api_key()
+        elif hasattr(clob_client, "create_or_derive_api_key"):
+            creds = clob_client.create_or_derive_api_key()
+        else:
+            creds = clob_client.create_or_derive_api_creds()
         if creds is None:
             raise RuntimeError("Failed to create or derive Polymarket API credentials")
         clob_client.set_api_creds(creds)
         self._clob_creds_source = "derived"
+
+    @staticmethod
+    def _builder_signature_type(builder: Any) -> Any:
+        if builder is None:
+            return None
+        return getattr(builder, "signature_type", None) or getattr(builder, "sig_type", None)
 
     @staticmethod
     def _extract_collateral_balance(response: Any) -> float | None:
@@ -2218,14 +2241,14 @@ class PolymarketClient:
         # ClobClient.__init__ is pure-local (no network) and creates the signer.
         if settings.polymarket_private_key:
             try:
-                from py_clob_client.client import ClobClient
-                from py_order_utils.model import EOA
+                from py_clob_client_v2.client import ClobClient
+                from py_clob_client_v2.order_utils.model.signature_type_v2 import SignatureTypeV2
 
                 _tmp = ClobClient(
-                    settings.polymarket_host,
+                    host=settings.polymarket_host,
                     key=settings.polymarket_private_key,
                     chain_id=settings.polymarket_chain_id,
-                    signature_type=EOA,
+                    signature_type=SignatureTypeV2.EOA,
                 )
                 addr = self._normalize_address(_tmp.signer.address())
                 if addr:
