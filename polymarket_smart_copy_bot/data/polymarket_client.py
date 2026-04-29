@@ -1227,9 +1227,12 @@ class PolymarketClient:
             net_free_balance = round(max(float(free_balance) - float(open_orders_reserved), 0.0), 4)
 
         funding_blocker = None
+        unwrapped_usdce_balance: float | None = None
         if isinstance(onchain_funding, dict):
             funder_pusd = onchain_funding.get("funder_pusd_balance_usd")
             funder_usdce = onchain_funding.get("funder_usdce_balance_usd")
+            if isinstance(funder_usdce, (int, float)):
+                unwrapped_usdce_balance = round(max(float(funder_usdce), 0.0), 4)
             if (
                 isinstance(funder_pusd, (int, float))
                 and isinstance(funder_usdce, (int, float))
@@ -1237,8 +1240,13 @@ class PolymarketClient:
                 and float(funder_usdce) >= 0.01
             ):
                 funding_blocker = "usdce_not_wrapped_to_pusd"
-        if total_balance is None and funding_blocker and free_balance is not None:
-            total_balance = round(float(free_balance), 4)
+        if unwrapped_usdce_balance is not None and free_balance is not None:
+            total_balance = round(
+                float(free_balance)
+                + float(positions_value or 0.0)
+                + unwrapped_usdce_balance,
+                4,
+            )
 
         return {
             "source": "polymarket",
@@ -1248,6 +1256,7 @@ class PolymarketClient:
             "positions_value_usd": positions_value,
             "total_balance_usd": total_balance,
             "tradable_collateral_usd": round(float(free_balance), 4) if free_balance is not None else None,
+            "unwrapped_usdce_balance_usd": unwrapped_usdce_balance,
             "positions_count": positions_count,
             "open_orders_count": open_orders_count,
             "funding_blocker": funding_blocker,

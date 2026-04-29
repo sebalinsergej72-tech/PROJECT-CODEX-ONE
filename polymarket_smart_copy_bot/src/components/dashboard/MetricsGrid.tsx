@@ -55,7 +55,10 @@ export function MetricsGrid({ status }: Props) {
     },
     {
       label: "Unwrapped USDC.e",
-      value: moneyNullable(status.account_balances?.onchain_funding?.funder_usdce_balance_usd),
+      value: moneyNullable(
+        status.account_balances?.unwrapped_usdce_balance_usd
+        ?? status.account_balances?.onchain_funding?.funder_usdce_balance_usd
+      ),
       tone: fundingBlocker ? ("warn" as const) : ("neutral" as const),
     },
     {

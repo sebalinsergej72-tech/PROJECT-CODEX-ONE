@@ -92,6 +92,7 @@ export interface BotStatus {
     positions_value_usd: number | null;
     total_balance_usd: number | null;
     tradable_collateral_usd?: number | null;
+    unwrapped_usdce_balance_usd?: number | null;
     funding_blocker?: string | null;
     onchain_funding?: {
       funder_pusd_balance_usd?: number | null;
