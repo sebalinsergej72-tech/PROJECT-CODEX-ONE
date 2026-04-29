@@ -1171,13 +1171,32 @@ class BackgroundOrchestrator:
             return
 
         now_iso = self._iso(datetime.now(tz=timezone.utc))
+        total_balance = balances.get("total_balance_usd")
+        free_balance = balances.get("free_balance_usd")
+        reference_balance = float(getattr(self._last_portfolio_state, "total_equity_usd", 0.0) or 0.0)
+        if (
+            settings.protect_against_zero_live_balance
+            and isinstance(total_balance, (int, float))
+            and float(total_balance) == 0.0
+            and reference_balance >= max(float(settings.suspicious_zero_balance_min_previous_usd), 0.0)
+        ):
+            logger.warning(
+                "Ignoring suspicious zero live account balance for dashboard; using ${:.2f}",
+                reference_balance,
+            )
+            total_balance = reference_balance
+            free_balance = reference_balance
+            balances["net_free_balance_usd"] = reference_balance
+            balances["positions_value_usd"] = 0.0
+            balances["open_orders_reserved_usd"] = 0.0
+
         self._last_exchange_balances = {
             "source": balances.get("source", "unknown"),
-            "free_balance_usd": balances.get("free_balance_usd"),
+            "free_balance_usd": free_balance,
             "net_free_balance_usd": balances.get("net_free_balance_usd"),
             "open_orders_reserved_usd": balances.get("open_orders_reserved_usd"),
             "positions_value_usd": balances.get("positions_value_usd"),
-            "total_balance_usd": balances.get("total_balance_usd"),
+            "total_balance_usd": total_balance,
             "positions_count": balances.get("positions_count", 0),
             "open_orders_count": balances.get("open_orders_count", 0),
             "updated_at": now_iso,

@@ -235,6 +235,14 @@ class Settings(BaseSettings):
         default=99.0,
         alias="TERMINAL_PROFIT_EXIT_HOLD_PRICE_CENTS",
     )
+    protect_against_zero_live_balance: bool = Field(
+        default=True,
+        alias="PROTECT_AGAINST_ZERO_LIVE_BALANCE",
+    )
+    suspicious_zero_balance_min_previous_usd: float = Field(
+        default=1.0,
+        alias="SUSPICIOUS_ZERO_BALANCE_MIN_PREVIOUS_USD",
+    )
 
     # Legacy/conservative defaults
     price_min_cents: int = Field(default=20, alias="PRICE_MIN_CENTS")

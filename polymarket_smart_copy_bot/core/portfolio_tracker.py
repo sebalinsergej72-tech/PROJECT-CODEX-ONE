@@ -287,6 +287,15 @@ class PortfolioTracker:
 
     async def update_capital_base(self, session: AsyncSession, balance: float) -> None:
         """Update capital base directly from a fresh API balance value."""
+        current_base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
+        reference_balance = await self._positive_balance_reference(session, current_base=current_base)
+        if self._is_suspicious_zero_live_balance(balance, reference_balance=reference_balance):
+            logger.warning(
+                "Ignoring suspicious zero live balance; preserving previous capital base ${:.2f}",
+                reference_balance,
+            )
+            await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, reference_balance)
+            return
         await self._set_runtime_float(session, self.CAPITAL_BASE_KEY, balance)
 
     async def recalculate_capital_base(self, session: AsyncSession, risk_mode: RiskMode) -> float:
@@ -301,9 +310,19 @@ class PortfolioTracker:
             current_base = settings.default_starting_equity
 
         api_balance = await self.polymarket_client.fetch_account_balance_usd()
-        if api_balance is not None and api_balance >= 0:
+        reference_balance = await self._positive_balance_reference(session, current_base=current_base)
+        if api_balance is not None and api_balance >= 0 and not self._is_suspicious_zero_live_balance(
+            api_balance,
+            reference_balance=reference_balance,
+        ):
             # Live API balance is authoritative and should override stale runtime values.
             current_base = api_balance
+        elif api_balance == 0 and reference_balance > 0:
+            logger.warning(
+                "Capital recalc received suspicious zero live balance; preserving ${:.2f}",
+                reference_balance,
+            )
+            current_base = reference_balance
         elif settings.auto_reinvest and risk_mode == "aggressive":
             # Only fallback to state-based reinvest when API balance is unavailable.
             state = await self.calculate_state(session, risk_mode=risk_mode)
@@ -365,6 +384,7 @@ class PortfolioTracker:
         capital_base = await self._get_runtime_float(session, self.CAPITAL_BASE_KEY)
         if capital_base is None:
             capital_base = settings.default_starting_equity
+        capital_base = await self._positive_balance_reference(session, current_base=capital_base)
 
         initial_capital = await self._get_runtime_float(session, self.INITIAL_CAPITAL_KEY)
         if initial_capital is None:
@@ -396,6 +416,16 @@ class PortfolioTracker:
             reported_free = balances.get("free_balance_usd") if isinstance(balances, dict) else None
             reported_net_free = balances.get("net_free_balance_usd") if isinstance(balances, dict) else None
             reported_reserve = balances.get("open_orders_reserved_usd") if isinstance(balances, dict) else None
+            if self._is_suspicious_zero_live_balance(reported_total, reference_balance=capital_base):
+                logger.warning(
+                    "Ignoring suspicious zero live total balance in portfolio state; using ${:.2f}",
+                    capital_base,
+                )
+                reported_total = capital_base
+                reported_free = capital_base
+                reported_net_free = capital_base
+                reported_positions = 0.0
+                reported_reserve = 0.0
 
             positions_value = (
                 round(float(reported_positions), 4)
@@ -451,6 +481,36 @@ class PortfolioTracker:
         )
         session.add(snapshot)
         return state
+
+    async def _positive_balance_reference(
+        self,
+        session: AsyncSession,
+        *,
+        current_base: float | None,
+    ) -> float:
+        current = max(float(current_base or 0.0), 0.0)
+        latest_positive = await self._latest_positive_equity(session)
+        return max(current, latest_positive)
+
+    async def _latest_positive_equity(self, session: AsyncSession) -> float:
+        threshold = max(float(settings.suspicious_zero_balance_min_previous_usd), 0.0)
+        query = (
+            select(PortfolioSnapshot.total_equity_usd)
+            .where(PortfolioSnapshot.total_equity_usd >= threshold)
+            .order_by(PortfolioSnapshot.taken_at.desc())
+            .limit(1)
+        )
+        value = (await session.execute(query)).scalar_one_or_none()
+        return float(value or 0.0)
+
+    @staticmethod
+    def _is_suspicious_zero_live_balance(value: object, *, reference_balance: float) -> bool:
+        if not settings.protect_against_zero_live_balance:
+            return False
+        if not isinstance(value, (int, float)):
+            return False
+        threshold = max(float(settings.suspicious_zero_balance_min_previous_usd), 0.0)
+        return float(value) == 0.0 and reference_balance >= threshold
 
     async def close_all_positions(self, session: AsyncSession, reason: str) -> int:
         query = select(Position).where(Position.is_open.is_(True))
