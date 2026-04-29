@@ -91,6 +91,17 @@ export interface BotStatus {
     open_orders_reserved_usd: number | null;
     positions_value_usd: number | null;
     total_balance_usd: number | null;
+    tradable_collateral_usd?: number | null;
+    funding_blocker?: string | null;
+    onchain_funding?: {
+      funder_pusd_balance_usd?: number | null;
+      funder_usdce_balance_usd?: number | null;
+      funder_usdc_balance_usd?: number | null;
+      funder_pusd_allowance_exchange_usd?: number | null;
+      funder_pusd_allowance_neg_risk_exchange_usd?: number | null;
+      funder_pusd_allowance_neg_risk_adapter_usd?: number | null;
+    } | null;
+    balance_is_authoritative?: boolean;
     positions_count: number;
     open_orders_count: number;
     updated_at: string | null;

@@ -24,6 +24,7 @@ function pnlTone(v: number): "good" | "bad" | "neutral" {
 export function MetricsGrid({ status }: Props) {
   if (!status) return null;
 
+  const fundingBlocker = status.account_balances?.funding_blocker;
   const metrics = [
     { label: "Engine", value: status.dry_run ? "DRY RUN" : "LIVE", tone: status.dry_run ? ("warn" as const) : ("good" as const) },
     { label: "Trading", value: status.trading_enabled ? "ENABLED" : "PAUSED", tone: status.trading_enabled ? ("good" as const) : ("warn" as const) },
@@ -48,9 +49,19 @@ export function MetricsGrid({ status }: Props) {
       tone: "neutral" as const,
     },
     {
-      label: "Free Balance (PM)",
-      value: moneyNullable(status.account_balances?.free_balance_usd),
-      tone: "neutral" as const,
+      label: "Tradable pUSD",
+      value: moneyNullable(status.account_balances?.tradable_collateral_usd ?? status.account_balances?.free_balance_usd),
+      tone: fundingBlocker ? ("bad" as const) : ("neutral" as const),
+    },
+    {
+      label: "Unwrapped USDC.e",
+      value: moneyNullable(status.account_balances?.onchain_funding?.funder_usdce_balance_usd),
+      tone: fundingBlocker ? ("warn" as const) : ("neutral" as const),
+    },
+    {
+      label: "Funding Status",
+      value: fundingBlocker ? "WRAP NEEDED" : "OK",
+      tone: fundingBlocker ? ("bad" as const) : ("good" as const),
     },
     {
       label: "Reserved Orders (PM)",

@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import json
 import ssl
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -73,6 +75,19 @@ class OrderResult:
     order_id: str | None
     tx_hash: str | None
     error: str | None = None
+
+
+PUSD_TOKEN_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+USDCE_TOKEN_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDC_TOKEN_ADDRESS = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+CTF_EXCHANGE_ADDRESS = "0xE111180000d2663C0091e4f400237545B87B996B"
+NEG_RISK_CTF_EXCHANGE_ADDRESS = "0xe2222d279d744050d28e00520010520000310F59"
+NEG_RISK_ADAPTER_ADDRESS = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+POLYGON_RPC_FALLBACK_URLS = (
+    "https://polygon.drpc.org",
+    "https://polygon.llamarpc.com",
+    "https://1rpc.io/matic",
+)
 
 
 @dataclass(slots=True)
@@ -1165,13 +1180,16 @@ class PolymarketClient:
                 "open_orders_reserved_usd": None,
                 "positions_value_usd": None,
                 "total_balance_usd": None,
+                "tradable_collateral_usd": None,
                 "positions_count": 0,
                 "open_orders_count": 0,
+                "funding_blocker": None,
             }
 
         free_balance = await self.fetch_account_balance_usd()
         open_positions = await self.fetch_account_open_positions(limit=500)
         open_orders = await self.fetch_open_orders()
+        onchain_funding = await self.fetch_onchain_funding_snapshot()
 
         positions_value: float | None = None
         positions_count = 0
@@ -1208,6 +1226,20 @@ class PolymarketClient:
             # SAFETY: use a conservative free-cash estimate for sizing.
             net_free_balance = round(max(float(free_balance) - float(open_orders_reserved), 0.0), 4)
 
+        funding_blocker = None
+        if isinstance(onchain_funding, dict):
+            funder_pusd = onchain_funding.get("funder_pusd_balance_usd")
+            funder_usdce = onchain_funding.get("funder_usdce_balance_usd")
+            if (
+                isinstance(funder_pusd, (int, float))
+                and isinstance(funder_usdce, (int, float))
+                and float(funder_pusd) <= 0.000001
+                and float(funder_usdce) >= 0.01
+            ):
+                funding_blocker = "usdce_not_wrapped_to_pusd"
+        if total_balance is None and funding_blocker and free_balance is not None:
+            total_balance = round(float(free_balance), 4)
+
         return {
             "source": "polymarket",
             "free_balance_usd": round(float(free_balance), 4) if free_balance is not None else None,
@@ -1215,9 +1247,27 @@ class PolymarketClient:
             "open_orders_reserved_usd": open_orders_reserved,
             "positions_value_usd": positions_value,
             "total_balance_usd": total_balance,
+            "tradable_collateral_usd": round(float(free_balance), 4) if free_balance is not None else None,
             "positions_count": positions_count,
             "open_orders_count": open_orders_count,
+            "funding_blocker": funding_blocker,
+            "onchain_funding": onchain_funding,
+            "balance_is_authoritative": True,
         }
+
+    async def fetch_onchain_funding_snapshot(self) -> dict[str, Any] | None:
+        """Read pUSD/USDC.e balances directly from Polygon for funding diagnostics."""
+
+        if self._dry_run or not settings.polymarket_onchain_balance_enabled:
+            return None
+        if not settings.polymarket_private_key:
+            return None
+
+        try:
+            return await asyncio.to_thread(self._fetch_onchain_funding_snapshot_sync)
+        except Exception as exc:
+            logger.warning("Failed to fetch onchain Polymarket funding snapshot: {}", exc)
+            return None
 
     async def place_order(self, request: OrderRequest) -> OrderResult:
         """Place an order through py-clob-client-v2 or simulate in DRY_RUN mode."""
@@ -1559,10 +1609,15 @@ class PolymarketClient:
         clob_client = self._ensure_clob_client()
         response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         balance = self._extract_collateral_balance(response)
+        try:
+            onchain_funding = self._fetch_onchain_funding_snapshot_sync()
+        except Exception as exc:
+            onchain_funding = {"error": str(exc)}
         signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
         builder = getattr(clob_client, "builder", None)
         funder_address = getattr(builder, "funder", None) if builder is not None else None
         signature_type = self._builder_signature_type(builder)
+        funding_blocker = self._funding_blocker_from_snapshot(onchain_funding)
         return {
             "code": "ok",
             "collateral_balance_usd": balance,
@@ -1571,6 +1626,8 @@ class PolymarketClient:
             "signer_address": signer_address,
             "funder_address": funder_address,
             "signature_type": signature_type,
+            "funding_blocker": funding_blocker,
+            "onchain_funding": onchain_funding,
         }
 
     def _diagnose_with_derived_retry_sync(self) -> dict[str, Any]:
@@ -1580,6 +1637,10 @@ class PolymarketClient:
         self._switch_to_derived_creds(clob_client)
         response = clob_client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         balance = self._extract_collateral_balance(response)
+        try:
+            onchain_funding = self._fetch_onchain_funding_snapshot_sync()
+        except Exception as exc:
+            onchain_funding = {"error": str(exc)}
         signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
         builder = getattr(clob_client, "builder", None)
         funder_address = getattr(builder, "funder", None) if builder is not None else None
@@ -1591,6 +1652,8 @@ class PolymarketClient:
             "signer_address": signer_address,
             "funder_address": funder_address,
             "signature_type": signature_type,
+            "funding_blocker": self._funding_blocker_from_snapshot(onchain_funding),
+            "onchain_funding": onchain_funding,
         }
 
     def _place_order_sync(self, request: OrderRequest) -> dict[str, Any]:
@@ -1740,6 +1803,104 @@ class PolymarketClient:
         if balance is not None:
             return balance
         return None
+
+    def _fetch_onchain_funding_snapshot_sync(self) -> dict[str, Any]:
+        clob_client = self._ensure_clob_client()
+        signer_address = clob_client.signer.address() if getattr(clob_client, "signer", None) else None
+        funder_address = settings.polymarket_proxy_address or signer_address
+        snapshot: dict[str, Any] = {
+            "signer_address": signer_address,
+            "funder_address": funder_address,
+            "rpc_url": None,
+        }
+        for label, address in (("signer", signer_address), ("funder", funder_address)):
+            if not address:
+                continue
+            snapshot[f"{label}_pusd_balance_usd"] = self._erc20_balance_usd(PUSD_TOKEN_ADDRESS, address)
+            snapshot[f"{label}_usdce_balance_usd"] = self._erc20_balance_usd(USDCE_TOKEN_ADDRESS, address)
+            snapshot[f"{label}_usdc_balance_usd"] = self._erc20_balance_usd(USDC_TOKEN_ADDRESS, address)
+            snapshot[f"{label}_pusd_allowance_exchange_usd"] = self._erc20_allowance_usd(
+                PUSD_TOKEN_ADDRESS,
+                address,
+                CTF_EXCHANGE_ADDRESS,
+            )
+            snapshot[f"{label}_pusd_allowance_neg_risk_exchange_usd"] = self._erc20_allowance_usd(
+                PUSD_TOKEN_ADDRESS,
+                address,
+                NEG_RISK_CTF_EXCHANGE_ADDRESS,
+            )
+            snapshot[f"{label}_pusd_allowance_neg_risk_adapter_usd"] = self._erc20_allowance_usd(
+                PUSD_TOKEN_ADDRESS,
+                address,
+                NEG_RISK_ADAPTER_ADDRESS,
+            )
+        snapshot["rpc_url"] = getattr(self, "_last_polygon_rpc_url", None)
+        snapshot["funding_blocker"] = self._funding_blocker_from_snapshot(snapshot)
+        return snapshot
+
+    @staticmethod
+    def _funding_blocker_from_snapshot(snapshot: dict[str, Any] | None) -> str | None:
+        if not isinstance(snapshot, dict):
+            return None
+        pusd = snapshot.get("funder_pusd_balance_usd")
+        usdce = snapshot.get("funder_usdce_balance_usd")
+        if (
+            isinstance(pusd, (int, float))
+            and isinstance(usdce, (int, float))
+            and float(pusd) <= 0.000001
+            and float(usdce) >= 0.01
+        ):
+            return "usdce_not_wrapped_to_pusd"
+        return None
+
+    def _erc20_balance_usd(self, token_address: str, owner_address: str) -> float:
+        data = "0x70a08231" + self._abi_address(owner_address)
+        return round(self._eth_call_uint(token_address, data) / 1_000_000, 6)
+
+    def _erc20_allowance_usd(self, token_address: str, owner_address: str, spender_address: str) -> float:
+        data = "0xdd62ed3e" + self._abi_address(owner_address) + self._abi_address(spender_address)
+        return round(self._eth_call_uint(token_address, data) / 1_000_000, 6)
+
+    def _eth_call_uint(self, to_address: str, data: str) -> int:
+        result = self._polygon_rpc_call(
+            "eth_call",
+            [{"to": to_address, "data": data}, "latest"],
+        )
+        return int(str(result), 16)
+
+    def _polygon_rpc_call(self, method: str, params: list[Any]) -> Any:
+        configured = str(settings.polygon_rpc_url or "").strip()
+        urls = [configured] if configured else []
+        urls.extend(url for url in POLYGON_RPC_FALLBACK_URLS if url and url not in urls)
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+        last_error: Exception | None = None
+        for url in urls:
+            try:
+                request = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "polymarket-smart-copy-bot/1.0",
+                    },
+                    method="POST",
+                )
+                context = ssl.create_default_context(cafile=certifi.where())
+                with urllib.request.urlopen(request, timeout=8, context=context) as response:
+                    body = response.read().decode("utf-8")
+                parsed = json.loads(body)
+                if parsed.get("error"):
+                    raise RuntimeError(parsed["error"])
+                self._last_polygon_rpc_url = url
+                return parsed.get("result")
+            except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError, OSError) as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"Polygon RPC call failed: {last_error}")
+
+    @staticmethod
+    def _abi_address(address: str) -> str:
+        return str(address).lower().removeprefix("0x").rjust(64, "0")
 
     def _ensure_clob_client(self) -> Any:
         from py_clob_client_v2.client import ClobClient

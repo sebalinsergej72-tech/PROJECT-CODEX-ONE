@@ -416,7 +416,13 @@ class PortfolioTracker:
             reported_free = balances.get("free_balance_usd") if isinstance(balances, dict) else None
             reported_net_free = balances.get("net_free_balance_usd") if isinstance(balances, dict) else None
             reported_reserve = balances.get("open_orders_reserved_usd") if isinstance(balances, dict) else None
-            if self._is_suspicious_zero_live_balance(reported_total, reference_balance=capital_base):
+            balance_is_authoritative = bool(balances.get("balance_is_authoritative")) if isinstance(balances, dict) else False
+            funding_blocker = balances.get("funding_blocker") if isinstance(balances, dict) else None
+            if (
+                not balance_is_authoritative
+                and funding_blocker is None
+                and self._is_suspicious_zero_live_balance(reported_total, reference_balance=capital_base)
+            ):
                 logger.warning(
                     "Ignoring suspicious zero live total balance in portfolio state; using ${:.2f}",
                     capital_base,

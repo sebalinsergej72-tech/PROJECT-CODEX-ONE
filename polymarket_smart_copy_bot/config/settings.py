@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     polymarket_api_passphrase: str | None = Field(default=None, alias="POLYMARKET_API_PASSPHRASE")
     polymarket_signature_type: int | None = Field(default=None, alias="POLYMARKET_SIGNATURE_TYPE")
     polymarket_verify_ssl: bool = Field(default=True, alias="POLYMARKET_VERIFY_SSL")
+    polygon_rpc_url: str = Field(default="https://polygon.drpc.org", alias="POLYGON_RPC_URL")
+    polymarket_onchain_balance_enabled: bool = Field(default=True, alias="POLYMARKET_ONCHAIN_BALANCE_ENABLED")
     polymarket_market_ws_enabled: bool = Field(default=True, alias="POLYMARKET_MARKET_WS_ENABLED")
     polymarket_market_ws_cache_ttl_seconds: int = Field(
         default=15,

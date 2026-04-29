@@ -250,6 +250,41 @@ class TradeExecutor:
                 logger.info("Trade {} skipped: {}", intent.external_trade_id, sell_reason)
                 return copied_trade.status
 
+        if (
+            intent_side == TradeSide.BUY.value
+            and not self.polymarket_client.is_dry_run()
+        ):
+            available_collateral = max(float(portfolio_state.available_cash_usd or 0.0), 0.0)
+            if available_collateral <= 0.01:
+                copied_trade.status = TradeStatus.SKIPPED.value
+                copied_trade.reason = "clob_collateral_unavailable"
+                self._stage_copied_trade(session, copied_trade)
+                logger.warning(
+                    "Trade {} skipped: CLOB V2 tradable collateral is unavailable",
+                    intent.external_trade_id,
+                )
+                return copied_trade.status
+            if target_size_usd > available_collateral:
+                resized_size = round(max(available_collateral, 0.0), 2)
+                if resized_size < self._minimum_position_size(portfolio_state=portfolio_state, risk_mode=risk_mode):
+                    copied_trade.status = TradeStatus.SKIPPED.value
+                    copied_trade.reason = "insufficient_clob_collateral"
+                    self._stage_copied_trade(session, copied_trade)
+                    logger.warning(
+                        "Trade {} skipped: insufficient CLOB V2 collateral target=${:.2f} available=${:.2f}",
+                        intent.external_trade_id,
+                        target_size_usd,
+                        available_collateral,
+                    )
+                    return copied_trade.status
+                logger.warning(
+                    "Trade {} resized to CLOB V2 collateral: requested=${:.2f} available=${:.2f}",
+                    intent.external_trade_id,
+                    target_size_usd,
+                    available_collateral,
+                )
+                target_size_usd = resized_size
+
         if requires_manual_confirmation:
             try:
                 await self._ensure_copied_trade_persisted(session, copied_trade)

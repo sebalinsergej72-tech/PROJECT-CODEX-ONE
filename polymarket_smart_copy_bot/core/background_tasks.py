@@ -166,6 +166,10 @@ class BackgroundOrchestrator:
             "open_orders_reserved_usd": None,
             "positions_value_usd": None,
             "total_balance_usd": None,
+            "tradable_collateral_usd": None,
+            "funding_blocker": None,
+            "onchain_funding": None,
+            "balance_is_authoritative": False,
             "positions_count": 0,
             "open_orders_count": 0,
             "updated_at": None,
@@ -1174,8 +1178,12 @@ class BackgroundOrchestrator:
         total_balance = balances.get("total_balance_usd")
         free_balance = balances.get("free_balance_usd")
         reference_balance = float(getattr(self._last_portfolio_state, "total_equity_usd", 0.0) or 0.0)
+        balance_is_authoritative = bool(balances.get("balance_is_authoritative"))
+        funding_blocker = balances.get("funding_blocker")
         if (
             settings.protect_against_zero_live_balance
+            and not balance_is_authoritative
+            and funding_blocker is None
             and isinstance(total_balance, (int, float))
             and float(total_balance) == 0.0
             and reference_balance >= max(float(settings.suspicious_zero_balance_min_previous_usd), 0.0)
@@ -1197,6 +1205,10 @@ class BackgroundOrchestrator:
             "open_orders_reserved_usd": balances.get("open_orders_reserved_usd"),
             "positions_value_usd": balances.get("positions_value_usd"),
             "total_balance_usd": total_balance,
+            "tradable_collateral_usd": balances.get("tradable_collateral_usd"),
+            "funding_blocker": funding_blocker,
+            "onchain_funding": balances.get("onchain_funding"),
+            "balance_is_authoritative": balance_is_authoritative,
             "positions_count": balances.get("positions_count", 0),
             "open_orders_count": balances.get("open_orders_count", 0),
             "updated_at": now_iso,
